@@ -1,0 +1,73 @@
+# Raw data (client-confidential, never committed)
+data/raw/*
+!data/raw/.gitkeep
+!data/raw/README.md
+
+# Intermediate parquet artifacts (regenerable, large)
+outputs/interim/*.parquet
+outputs/interim/*.csv
+outputs/features/*.parquet
+outputs/features/*.csv
+outputs/eda/*.csv
+outputs/eda/*.png
+outputs/models/*.pkl
+outputs/models/*.csv
+outputs/prioritization/*.csv
+
+# Keep the placeholder README so empty folders show in repo
+!outputs/README.md
+!outputs/*/README.md
+
+# Local development helpers (machine-specific, not for repo)
+smoke_test.py
+run_phase1.py
+run_phase2.py
+run_remaining.py
+run_from_4a.py
+local_config.py
+verify_quartile_means.py
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
