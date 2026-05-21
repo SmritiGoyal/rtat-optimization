@@ -11,6 +11,16 @@ Author: **Smriti Goyal** ([github.com/SmritiGoyal](https://github.com/SmritiGoya
 
 End-to-end production-style pipeline that predicts repair turn-around time (RTAT) for a Fortune 500 appliance manufacturer's US service network, then translates predictions into segment-level resource allocation recommendations across four operational levers.
 
+## The Problem
+
+Repair turn-around time prediction sits at the intersection of operations research and applied machine learning, and it's harder than it first appears for three reasons:
+
+- **Operational variability is structural, not noise.** Repair durations depend on engineer availability, parts logistics, channel routing rules, and customer responsiveness — five mostly-independent systems that each have their own failure modes. A naive average over the cohort hides 40-day swings between adjacent segments. The model needs to capture interactions across operational dimensions, not just main effects.
+- **Leakage hides in process timing, not just in target columns.** Some features are populated at intake (safe), some during repair (only safe if the model is being scored mid-repair), some at close (post-hoc, unsafe for any forward-looking prediction). The pipeline introduces an explicit timing classification — INTAKE / TRAINING / POST_INTAKE / MEDIUM / POST_CLOSE — to keep that discipline mechanical rather than mental. The five-test automated audit catches the subtle violations that human review misses.
+- **Predictions only matter if they translate to interventions.** A 4.60-day MAE is operationally meaningless without saying which 28 Market_Category × Channel segments to act on and which of four operational levers to pull. The downstream lever decomposition is the deliverable; the model is the input.
+
+This project addresses all three within a reproducible single-machine pipeline.
+
 The pipeline processes **2.19M repair records** across 4 source years, joins three operational tables (master records, parts ledger, callback records), engineers **41 leakage-audited features**, trains and compares **15 candidate models** (7 classifiers + 8 regressors), and produces a prioritized action plan for the worst-performing service segments.
 
 ## Headline results
@@ -29,14 +39,37 @@ Validated end-to-end on a strict 2026 out-of-time holdout:
 
 These numbers are reproducible from this code on the source data. The lever decomposition shows the top operational priorities split across four levers — **46% engineer deployment, 25% parts logistics, 18% channel process, 11% repair complexity** — concentrated in 7 Market_Category × Channel segments that appear in the top 10 across every operating threshold (T=3, 5, 7, 10).
 
-## What this repo demonstrates
+## Key Technical Decisions
 
-- **Cross-source data engineering**: streaming three multi-million-row Excel sources, normalizing inconsistent join keys, and validating cohort integrity before joining.
-- **Leakage-disciplined feature engineering**: 41 features each classified by computation timing (INTAKE / TRAINING / POST_INTAKE / MEDIUM / POST_CLOSE) with an automated 5-test audit catching the subtle leakage patterns (target encoding, future-data proxies, train-vs-holdout distribution shift).
-- **Comparative model evaluation**: baseline → linear → tree → ensemble → boosting, with the clear lift at each stage justifying the LightGBM production choice rather than asserting it.
-- **Threshold sensitivity**: the same model evaluated at T=3, 5, 7, 10 days, with `is_unbalance=True` engaged at skewed thresholds.
-- **Business translation**: predictions converted into a Market_Category × Channel priority matrix with a four-lever decomposition that maps directly to operational interventions.
-- **Two-track feature design**: CORE (27 features, 0% missing) for linear models with median fill, EXTENDED (37 features, ~75% missing on DMS-dependent fields) for tree models that handle nulls natively.
+The choices below are the ones that drove the result. Each came from a measured failure of the alternative or an explicit constraint in the data.
+
+### 1. Strict temporal split with locked 2026 holdout
+
+Train on 2023-2024, validate on 2025, hold out 2026 — used exactly once at the end. A random split would let the model see future engineer assignments, future parts logistics shifts, and future seasonal patterns — all of which leak in subtle ways the validation log loss wouldn't catch. The 0.011 AUC gap between validation (0.821) and holdout (0.809) is the strongest evidence the model generalizes across operating years; a wider gap would have signaled overfitting to 2025's specific operational rhythm.
+
+### 2. Five-class timing taxonomy, not "use everything available"
+
+Every feature gets one of five labels: INTAKE, TRAINING, POST_INTAKE, MEDIUM, POST_CLOSE. Only INTAKE and TRAINING-class features are deployment-safe for a model scored at repair intake. The MEDIUM-class features (`is_ter_repair`, `is_sealed_repair`, `eng_channel_risk`) are flagged for operational confirmation rather than silently included or excluded — the methodology surfaces the assumption rather than burying it. This taxonomy is enforced by the automated audit, so timing discipline doesn't depend on remembering it during feature engineering.
+
+### 3. Two-track CORE / EXTENDED feature design, not one-size-fits-all
+
+The 41 features split into two model-specific subsets. CORE (27 features) has 0% missingness and is safe for linear models after median fill. EXTENDED (37 features) adds DMS-dependent features for tree models that handle nulls natively — those features have ~75% missingness because only ~28% of repairs route parts through DMS. This isn't a stylistic choice: linear models on EXTENDED produce worse holdout performance because median fill on 75%-null features destroys signal; tree models on CORE leave money on the table. The split is informed by both validation metrics and operational deployability.
+
+### 4. Five-test automated leakage audit, not human review
+
+Human review catches obvious leakage (target columns, hash of identifier) and misses subtle leakage (target encoding without proper folding, future-data proxies, train-vs-holdout distribution shift). The audit runs five mechanical tests on every feature: correlation with target above class-conditional levels, perfect-predictor flag, target-encoding folding check, future-data proxy detection, train-vs-holdout stability. Of 41 features, 33 pass clean; 8 are flagged for human review with explicit reasons. The discipline is in catching what manual review wouldn't.
+
+### 5. Comparative model evaluation, not asserted choice
+
+Baseline → linear (Ridge, Lasso) → tree (depth-6) → ensemble (RF) → boosting (XGBoost, LightGBM), with the lift at each stage justifying the LightGBM production choice rather than asserting it. The progression from mean baseline MAE 6.77 days → LightGBM MAE 4.64 days is monotone at each model class. The 0.04-day gap between XGBoost and LightGBM is within noise; the choice was made on training efficiency (LightGBM ~25% faster) and native categorical handling.
+
+### 6. Lever decomposition translates predictions to interventions
+
+A model that predicts which repairs will run late is useless without saying what to do about it. The downstream prioritization layer scores every Market_Category × Channel segment (≥500 repairs, 28 segments total) against four operational levers — engineer deployment, parts logistics, channel process, repair complexity — using a deterministic scoring rule per lever. Each segment gets a primary and secondary lever assignment. This is the business deliverable; the model is the input.
+
+### 7. NPS used only for post-hoc validation, never as a feature
+
+NPS responses (Promoter / Passive / Detractor) were explicitly excluded from the training feature set. Including them would have been target leakage — NPS scores correlate strongly with repair duration. Using them post-hoc to validate the model's business relevance yields a 16.5-point promoter rate gap between the lowest-risk and highest-risk predicted buckets, confirming the model addresses a real customer-experience problem rather than just an internal operational metric.
 
 ## Repo structure
 
