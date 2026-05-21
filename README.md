@@ -75,15 +75,18 @@ NPS responses (Promoter / Passive / Detractor) were explicitly excluded from the
 
 ```
 rtat-optimization/
-├── ingestion.py              Step 1-4: Excel → integrated parquet
-├── eda.py                    Step 5: first-pass EDA + hypothesis list
-├── feature_engineering.py    Step 6: 41 model features + leakage review
-├── modeling.py               Step 7: 15 candidate models + comparison
-├── prioritization.py         Step 8: priority matrix + 4-lever decomposition
-├── leakage_audit.py          Step 9: 5-test feature audit
+├── src/
+│   ├── ingestion.py              Step 1-4: Excel → integrated parquet
+│   ├── eda.py                    Step 5: first-pass EDA + hypothesis list
+│   ├── feature_engineering.py    Step 6: 41 model features + leakage review
+│   ├── modeling.py               Step 7: 15 candidate models + comparison
+│   ├── prioritization.py         Step 8: priority matrix + 4-lever decomposition
+│   ├── leakage_audit.py          Step 9: 5-test feature audit
+│
 ├── data/
 │   ├── raw/                  (gitignored — client data)
 │   └── README.md             Schema documentation
+│
 ├── outputs/                  (gitignored — regenerable)
 │   ├── interim/              Ingestion artifacts
 │   ├── eda/                  Stats tables + charts
@@ -91,9 +94,12 @@ rtat-optimization/
 │   ├── models/               Trained models + comparison tables
 │   ├── prioritization/       Priority matrix + lever decomposition
 │   └── README.md             Artifact catalog
+│
 ├── docs/
 │   ├── methodology.md        Extended technical writeup
 │   └── deck.md               Stakeholder presentation (markdown)
+│
+├── .gitignore
 ├── requirements.txt
 ├── LICENSE                   MIT
 └── README.md                 (this file)
