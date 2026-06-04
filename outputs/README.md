@@ -107,9 +107,10 @@ Produced by `modeling.py` (Step 7) and updated by `leakage_audit.py` (Step 9).
 | `classification_results.csv` | All 7 classifiers at T=5: AUC, AP, P/R/F1, confusion matrix counts |
 | `regression_results.csv` | All 8 regressors: MAE / RMSE / R² on validation |
 | `threshold_results.csv` | LightGBM at T=3/5/7/10: AUC, P/R/F1, positive rate |
+| `threshold_results_xgb.csv` | XGBoost per-threshold AUC/F1 |
 | `threshold_sensitivity.csv` | Operating-point sweep: P/R/F1 at decision thresholds 0.10-0.90 |
 | `feature_importance.csv` | Side-by-side LightGBM vs XGBoost importance with rank difference |
-| `lasso_features.csv` | Lasso coefficients per CORE feature (3 zeroed at α=0.01) |
+| `lasso_features.csv` | Lasso coefficients per CORE feature (2 zeroed at α=0.01) |
 | `segment_performance.csv` | Per Market_Category: AUC of LightGBM and XGBoost |
 | `channel_performance.csv` | Per Channel: AUC of LightGBM and XGBoost |
 | `leakage_audit.csv` | Per-feature verdicts from the 5-test audit |
@@ -125,6 +126,8 @@ Produced by `modeling.py` (Step 7) and updated by `leakage_audit.py` (Step 9).
 | `lgbm_regression.pkl` | LightGBM regressor on `target_days` (used for `pred_rtat`) |
 | `xgb_ontime5.pkl` | XGBoost reference classifier (kept for comparison) |
 | `xgb_regression.pkl` | XGBoost reference regressor |
+| `xgb_ontime{3,5,7,10}.pkl` | XGBoost per-threshold classifiers (validated equal to LightGBM) |
+| `lgbm_regression_final.pkl` | LightGBM regressor refit on all 2023-2025 (final holdout model) |
 
 ---
 
@@ -151,7 +154,7 @@ The lever decomposition uses four operational levers:
 | `channel_process` | `max(0, channel_risk - 3)` — DMS/DMS2/ASC=0, Premier=1, ASD=2, AE=3, SPO=4 |
 | `repair_complexity` | Sealed rate × 1.30 (+2), reclaim rate × 1.30 (+1) |
 
-The validated lever mix on the train+val cohort: **46% engineer / 25% parts / 18% channel / 11% complexity**.
+The validated lever mix on the train+val cohort: **43% engineer (12) / 29% parts (8) / 18% channel (5) / 11% complexity (3)**.
 
 ---
 
