@@ -24,7 +24,7 @@ The pipeline includes one POST_CLOSE feature in the dataset for audit reference 
 
 ## Feature spec at a glance
 
-The 41 features split into nine groups defined in the `FEATURE_SPEC` constant:
+The 41 features split into eight groups defined in the `FEATURE_SPEC` constant:
 
 | Group | Count | Examples |
 |---|---:|---|
@@ -185,7 +185,7 @@ Four binary flags derived from upstream columns:
 
 ### `engineer_hist_mean_rtat`
 
-**Source:** Engineered upstream in `ingestion.py` (Step 4C) as the historical mean RTAT per engineer across training years 2023-2025 only.
+**Source:** Recomputed fold-scoped in feature engineering (`add_engineer_mean`): the per-engineer mean `target_days` is fit on the training fold only (2023-2024 for model selection; 2023-2025 for the final model) and merged onto the rows it is applied to. The current record never enters its own engineer's mean.
 
 **Formula:** For each engineer, the mean `target_days` over their training-cohort repairs. The current record is never included in the aggregate (computation is point-in-time correct: engineer's history at the time of this repair).
 
@@ -193,7 +193,7 @@ Four binary flags derived from upstream columns:
 
 **Rationale:** This is the **single strongest feature** in the model — ~22% LightGBM importance. The 4× RTAT gap between Q1 (fastest 25%) and Q4 (slowest 25%) engineers reflects real, persistent variation in engineer effectiveness due to experience, regional knowledge, and tool/parts familiarity.
 
-**Implementation:** Aggregate is built in ingestion Step 4C; this stage just consumes it.
+**Implementation:** Section 6, `add_engineer_mean()` (fold-scoped), consumed by `add_engineer_features()` for quartile binning. The earlier ingestion-side computation fit on the full 2023-2025 cohort and was the source of a validation-fold leak — see methodology Section 7.5.
 
 ### `engineer_quartile`
 
@@ -430,5 +430,6 @@ Only `OnTime_5` and `target_days` are used as primary modeling targets in `model
 
 - **Production code:** `feature_engineering.py` — every transformation here is documented in the corresponding subsection (6A through 6O).
 - **Leakage audit:** `leakage_audit.py` runs five tests on every feature to catch the subtle leakage patterns; results in `outputs/features/leakage_review.csv`.
+- Note: the 5-test audit does not detect validation-fold encoder leaks; see methodology Section 7.5.
 - **Methodology writeup:** `docs/methodology.md` — full discussion of the cohort filter, target encoding smoothing, engineer historical mean discipline, two-track CORE/EXTENDED feature design, and hyperparameter selection.
 - **Schema:** `data/README.md` — full source-data schema documentation with channel glossary and cohort filter rules.
