@@ -153,6 +153,10 @@ engineer_hist_mean_rtat(eng_id) = mean(target_days for all repairs by eng_id)
 
 Critically, this is computed on **training-period repairs only** (2023-2024 in the train split). For a validation repair in 2025 by engineer E, the feature value is E's mean across their 2023-2024 repairs — even if E continued to work in 2025.
 
+In the original implementation this aggregate was fit in ingestion across the full 2023-2025 cohort and merged before the
+train/validation split — so 2025 validation rows did see 2025 RTATs. This was caught in audit and fixed: the engineer mean is now recomputed fold-scoped in feature engineering (fit on the 2023-2024 fold for selection; refit on 2023-2025
+for the final model). See Section 7.5.
+
 This avoids two failure modes:
 1. **Information leakage:** if computed on the full dataset, the feature would include the current repair's contribution to its own engineer's mean.
 2. **Future leakage:** if computed across all years, a 2025 validation repair would see 2025 RTATs reflected in the engineer mean.
@@ -198,7 +202,7 @@ The model comparison runs all models in parallel for fair comparison:
 
 **Regression (8 models):** Mean Baseline → Segment Mean (tier × channel) → Ridge → Lasso → Decision Tree → Random Forest → XGBoost → LightGBM
 
-LightGBM beat XGBoost on validation AUC by 0.001 (0.821 vs 0.820) and matched it on regression MAE (4.64 vs 4.65). The 0.04d gap on MAE and 0.001 on AUC is within noise; the choice came down to:
+On the final 2026 holdout, LightGBM and XGBoost are within ~0.005 AUC at every threshold (T=5: 0.807 vs 0.812) — effectively tied; on validation regression XGBoost edges LightGBM within noise (4.92 vs 4.95). The choice came down to:
 
 - **Training efficiency** — LightGBM trained ~25% faster on the full feature matrix
 - **Categorical handling** — LightGBM natively handles high-cardinality categoricals without explicit encoding
@@ -230,7 +234,7 @@ The production LightGBM classifier configuration:
 }
 ```
 
-with `lgb.early_stopping(50)` as the training callback. These are *not* heavily tuned. A formal Optuna sweep is on the "what I'd do differently" list. The chosen values reflect:
+with `lgb.early_stopping(50)` as the training callback. These are *not* heavily tuned. They were also not re-tuned after the fold-scoped encoder fix, which is why single-fit LightGBM now underfits at default iterations (best_iter ~29) in the bake-off. A formal Optuna sweep is on the "what I'd do differently" list. The chosen values reflect:
 
 - `learning_rate = 0.05` with `n_estimators = 500` and early stopping at 50 rounds = a stable mid-tier learning rate that converges well below 500 trees (typically 100-150)
 - `num_leaves = 31` is **conservative for a 1M-row dataset**, paired with `max_depth = 6`. The deliberate undersize prevents the model from learning overly specific patterns
@@ -249,7 +253,10 @@ Training four models is computationally cheap (~30 sec per model on the full fea
 
 ### 6.1 Time-based splits, never random
 
-The training data spans 2023-2025; the holdout is 2026 Jan-Apr. Within training, the validation split is `source_year == 2025` while train is `source_year ∈ {2023, 2024}`.
+The training data spans 2023-2025; the holdout is 2026 (Jan-Apr). Aggregates are fit on the 2023-2024 fold for selection and refit on all 2023-2025 for the final model; the 2026 holdout is scored exactly once. This discipline is what makes the validation and holdout numbers meaningful.
+
+**Validation-to-holdout, honestly.** 
+The model is selected on a strict 2023-2024 -> 2025 split (T=5 validation AUC ~0.77), then refit on all 2023-2025 and scored once on the locked 2026 holdout (T=5 AUC 0.807). The holdout sits slightly above the selection-fold validation because the final model trains on an extra year of data. Generalization is evidenced by consistent performance across all four thresholds and by the NPS external validation — not by a single tight gap.
 
 This is non-negotiable for a deployment scenario. A random split would let the model see July 2025 patterns at training time and predict on June 2025 — production won't have that information. The 0.011 validation→holdout AUC gap is the empirical proof that the model generalizes; this number only means something if the validation set is strictly newer than training.
 
@@ -263,11 +270,12 @@ The 2026 holdout was reserved at the cohort stage and never appeared in:
 
 The first time the 2026 holdout was scored was the final evaluation step. There is no risk of accidental tuning on holdout.
 
-### 6.3 What the 0.011 gap means
+### 6.3 The two-phase protocol, and why the original gap was misleading
 
-A val→holdout AUC gap of 0.011 (0.821 → 0.809) is the headline reproducibility result. For context, in adjacent CTR/credit-risk literature, gaps of 0.04-0.08 between in-distribution validation and true out-of-time holdout are common. A gap of ~0.01 indicates the model is genuinely capturing operational patterns rather than memorizing temporally-leaked artifacts.
+The original pipeline reported a 0.011 validation->holdout gap. That number was an artifact: training-class aggregates were fit on the full 2023-2025 cohort and then split into train/validation without refitting, so the 2025 validation metric was inflated and the gap to the (clean) 2026 holdout looked artificially tight.
 
-The gap holds across all four thresholds (T=3: 0.013, T=5: 0.011, T=7: 0.020, T=10: 0.011), which strengthens the result — if there were a systematic leak in any threshold, we'd expect that threshold's gap to be anomalous.
+After the fix, the honest protocol is two phases — select on 2023-2024 -> 2025, then refit on 2023-2025 and score 2026 once. Final holdout AUC is 0.807 at T=5, 0.787 / 0.807 / 0.827 / 0.858 across T=3/5/7/10. The holdout sits slightly above
+the selection-fold validation (~0.77 at T=5) because the final model trains on an extra year; the consistent across threshold performance and the NPS external check are the real generalization evidence.
 
 ## 7. The Leakage Audit
 
@@ -299,6 +307,8 @@ Of 41 features, the audit returns:
 | ⚠ REVIEW | 2 | `parts_has_arrival_flag`, `parts_delivery_tier` |
 | ⚠ STABILITY FLAG | 3 | `month_of_year`, `quarter`, plus one feature with > 0.30 KS shift |
 
+These verdicts are unchanged by the encoder fix — see Section 7.5 for why the audit could not have flagged the leak that was present.
+
 Test 5 (engineer proxy stability) returned a 0.74-day train-vs-holdout gap, well within the 1.0-day tolerance. Test 4 (`reclaim_period_days` targeted check) passed both correlation (< 0.15) and importance (< 5%) thresholds.
 
 The 3 STABILITY FLAG features (`month_of_year`, `quarter`) shift because the 2026 holdout is a partial year (Jan-Apr) versus full-year training. This is acceptable temporal drift, not leakage. The 3 CONFIRM WITH OPS features require human verification of intake-time availability before production deployment — they are kept in the model with this caveat documented.
@@ -315,9 +325,21 @@ The audit does *not* catch:
 - ✗ Train/test contamination via duplicate rows (would need row-level dedup audit)
 - ✗ Feature group leakage where the *combination* of features is leaky (would need permutation testing)
 - ✗ Label leakage from the cohort filter itself (would need to compare results across cohort definitions)
-- ✗ Operator error in the encoder fit step (would need pipeline-trace verification)
+- ✗ Operator error in the encoder fit step - **this is exactly the leak found in this project** (aggregates fit on 2023-2025 then split without refit). The audit passed because it compares train vs the 2026 holdout and is blind to a validation-fold leak. Caught by a fold-scoping ablation; see 7.5.
 
 A v2 audit would add at least the first two of these.
+
+### 7.5 The leak this audit missed — and the fix
+
+**Fold-scoped encoder fitting (leak found and fixed).** 
+An internal audit caught that the training-class aggregates — engineer historical mean (the model's strongest feature), tier / channel / division / month means, city and state target encoding, and the segment delivery median — were originally fit on the full 2023-2025 cohort and then split into train (2023-2024) and validation (2025) without refitting. That let 2025 information reach the validation rows and inflated the validation metrics (and the apparent validation-to-holdout gap). 
+
+The fix scopes every aggregate to data available before the rows it is applied to: for model selection, aggregates are fit on the 2023-2024 fold and validated on 2025; for the final number, a select-then-refit protocol refits the aggregates and retrains on all of 2023-2025, then scores the locked 2026 holdout exactly once.
+
+**What the five-test audit did not catch.** 
+The audit compares training against the 2026 holdout, so it is blind to a leak confined to the *validation fold*: the leaked aggregates were "train-only" relative to 2026, so all five tests passed while 2025 was still bleeding into validation. The methodology already described fold-correct fitting ("training-period only"); the implementation fit more broadly than that. The mismatch was caught by a fold-scoping ablation, not by the audit — and the fix made the implementation match the documented discipline.
+
+A defensible audit therefore needs a sixth test: refit every encoder per fold and assert the validation metric is stable. That is the first addition planned for av2 audit.
 
 ## 8. Operational Translation
 
@@ -361,7 +383,7 @@ The primary lever for each segment is the one with the highest score. The second
 
 Multipliers (1.15, 1.30, 1.10) were calibrated through iteration with stakeholder review, not by minimizing a held-out metric. This is appropriate for an operational recommendation system: the goal is decision quality, not predictive accuracy, and decisions are validated by stakeholder review.
 
-The validated lever mix on the train+val cohort: **46% engineer / 25% parts / 18% channel / 11% complexity**. No single lever dominates, which means the four-lever framework is doing real work — if 80%+ of segments were assigned to one lever, the framework would collapse to a single recommendation.
+The validated lever mix on the train+val cohort: **43% engineer / 29% parts / 18% channel / 11% complexity**. No single lever dominates, which means the four-lever framework is doing real work — if 80%+ of segments were assigned to one lever, the framework would collapse to a single recommendation.
 
 ### 8.3 NPS as honest external validation
 
@@ -369,11 +391,12 @@ The most defensible piece of the prioritization output is the NPS post-hoc check
 
 | Predicted risk bucket | Promoter rate | Detractor rate |
 |---|---|---|
-| Very low (0-20% predicted late) | 73.5% | 16.5% |
-| Very high (80-100% predicted late) | 57.0% | 29.0% |
-| **Gap** | **16.5pp** | **12.5pp** |
+| Very low (0-20% predicted late) | 62.6% | 25.0% |
+| Very high (80-100% predicted late) | 57.4% | 28.8% |
+| **Gap** | **5.2pp** | **3.8pp** |
 
-The 16.5-percentage-point promoter gap and 12.5-percentage-point detractor gap between low-risk and high-risk predicted segments is strong external evidence that the segment prioritization reflects real customer experience, not just statistical artifacts. Critically, these numbers cannot be tuned — there's no way to game them from inside the modeling pipeline because NPS never enters the model.
+The 5.2-point promoter gap and 3.8-point detractor gap are computed out-of-sample — 2025 NPS responders scored by the
+2023-2024 selection model (which never saw 2025), with NPS never entering the model. An earlier build reported a wider gap; that version was inflated by the encoder leak corrected in Section 7.5. The signal still cannot be tuned from inside the pipeline (NPS is not a feature).
 
 ---
 
@@ -381,10 +404,10 @@ The 16.5-percentage-point promoter gap and 12.5-percentage-point detractor gap b
 
 The project's defensible claims, in order of strength:
 
-1. **Strong holdout generalization.** Val→holdout AUC gap of ~0.011 across all four thresholds.
+1. **Honest out-of-time generalization.** Final 2026 holdout AUC 0.807 (T=5) under a select-then-refit protocol, with a fold-level encoder leak found and fixed during audit (Section 7.5).
 2. **Leakage-safe by construction.** Five-test audit returns 33/41 CLEAN; train-only encoder fits documented; engineer-proxy gap of 0.74d well within tolerance.
-3. **32% MAE improvement over baseline** on a strict out-of-time test set (4.60d vs 6.77d).
-4. **Operational translation across 4 levers.** Top recommendation segment plus three additional levers cover the operational decision space; no single lever monopolizes (46/25/18/11 distribution).
-5. **NPS external validation.** 16.5pp promoter gap, 12.5pp detractor gap between low-risk and high-risk predicted segments, computed without NPS in the model.
+3. **32% MAE improvement over baseline** on the locked 2026 holdout (4.58d vs 6.77d).
+4. **Operational translation across 4 levers.** Top recommendation segment plus three additional levers cover the operational decision space; no single lever monopolizes (43/29/18/11 distribution).
+5. **5.2pp promoter gap, 3.8pp detractor gap** between low-risk and high-risk predicted segments, computed out-of-sample (2025 responders scored by the 2023-24 selection model) without NPS in the model. The earlier wider gap was inflated by the encoder leak.
 
 The weakest claims, by contrast, are about specific lever multipliers (1.15×, 1.30×) — those would benefit from formal sensitivity analysis in a v2.
