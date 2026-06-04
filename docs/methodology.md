@@ -151,19 +151,17 @@ Each engineer has a historical track record from prior repairs. The naive featur
 engineer_hist_mean_rtat(eng_id) = mean(target_days for all repairs by eng_id)
 ```
 
-Critically, this is computed on **training-period repairs only** (2023-2024 in the train split). For a validation repair in 2025 by engineer E, the feature value is E's mean across their 2023-2024 repairs — even if E continued to work in 2025.
+Critically, this **should** be computed on training-period repairs only — and after the fix described below, it is. For a validation repair in 2025 by engineer E, the feature value is E's mean across the 2023-2024 training fold, even if E continued to work in 2025.
 
-In the original implementation this aggregate was fit in ingestion across the full 2023-2025 cohort and merged before the
-train/validation split — so 2025 validation rows did see 2025 RTATs. This was caught in audit and fixed: the engineer mean is now recomputed fold-scoped in feature engineering (fit on the 2023-2024 fold for selection; refit on 2023-2025
-for the final model). See Section 7.5.
+In the original implementation this aggregate was fit in ingestion across the full 2023-2025 cohort and merged before the train/validation split — so 2025 validation rows did see 2025 RTATs. This was caught in audit and fixed: the engineer mean is now recomputed fold-scoped in feature engineering (fit on the 2023-2024 fold for selection; refit on 2023-2025 for the final model). See Section 7.5.
 
 This avoids two failure modes:
 1. **Information leakage:** if computed on the full dataset, the feature would include the current repair's contribution to its own engineer's mean.
 2. **Future leakage:** if computed across all years, a 2025 validation repair would see 2025 RTATs reflected in the engineer mean.
 
-`engineer_proxy_missing` is a flag for engineers who appear in validation/holdout but not in training (new hires, transfers, etc.). For these rows the feature falls back to the global mean. The quartile thresholds (Q1≤5.5d, Q2≤7.2d, Q3≤11.7d, Q4 > 11.7d) are also computed on training data and frozen.
+`engineer_proxy_missing` is a flag for engineers who appear in validation/holdout but not in training (new hires, transfers, etc.). For these rows the feature falls back to the global mean. The quartile thresholds (Q1≤5.5d, Q2≤7.2d, Q3≤11.7d, Q4 > 11.7d quoted here are the final-model values fit on 2023-2025; the selection model uses 2023-2024-fit cutpoints) are also computed on training data and frozen.
 
-The validated within-quartile mean RTAT shows a long-tail pattern, not a smooth gradient: **Q1=4.5d, Q2=6.3d, Q3=8.9d, Q4=17.7d**. The slowest 25% of engineers are dramatically slower than the rest (Q4/Q1 ratio = 3.9×), which is why engineer deployment is the dominant lever in the segment decomposition (46% of segments).
+The validated within-quartile mean RTAT shows a long-tail pattern, not a smooth gradient: **Q1=4.5d, Q2=6.3d, Q3=8.9d, Q4=17.7d**. The slowest 25% of engineers are dramatically slower than the rest (Q4/Q1 ratio = 3.9×), which is why engineer deployment is the dominant lever in the segment decomposition (43% of segments).
 
 ### 4.5 Segment-safe delivery feature
 
@@ -255,10 +253,10 @@ Training four models is computationally cheap (~30 sec per model on the full fea
 
 The training data spans 2023-2025; the holdout is 2026 (Jan-Apr). Aggregates are fit on the 2023-2024 fold for selection and refit on all 2023-2025 for the final model; the 2026 holdout is scored exactly once. This discipline is what makes the validation and holdout numbers meaningful.
 
-**Validation-to-holdout, honestly.** 
+**Validation-to-holdout, honestly.**
 The model is selected on a strict 2023-2024 -> 2025 split (T=5 validation AUC ~0.77), then refit on all 2023-2025 and scored once on the locked 2026 holdout (T=5 AUC 0.807). The holdout sits slightly above the selection-fold validation because the final model trains on an extra year of data. Generalization is evidenced by consistent performance across all four thresholds and by the NPS external validation — not by a single tight gap.
 
-This is non-negotiable for a deployment scenario. A random split would let the model see July 2025 patterns at training time and predict on June 2025 — production won't have that information. The 0.011 validation→holdout AUC gap is the empirical proof that the model generalizes; this number only means something if the validation set is strictly newer than training.
+A time-ordered split is non-negotiable for a deployment scenario. A random split would let the model see July 2025 patterns at training time and predict on June 2025 — production won't have that information. The time-ordered split is what makes the validation and holdout numbers meaningful; see Section 6.3 for why the originally-reported tight validation->holdout gap was an artifact rather than evidence of generalization.
 
 ### 6.2 Holdout never seen, ever
 
@@ -274,8 +272,7 @@ The first time the 2026 holdout was scored was the final evaluation step. There 
 
 The original pipeline reported a 0.011 validation->holdout gap. That number was an artifact: training-class aggregates were fit on the full 2023-2025 cohort and then split into train/validation without refitting, so the 2025 validation metric was inflated and the gap to the (clean) 2026 holdout looked artificially tight.
 
-After the fix, the honest protocol is two phases — select on 2023-2024 -> 2025, then refit on 2023-2025 and score 2026 once. Final holdout AUC is 0.807 at T=5, 0.787 / 0.807 / 0.827 / 0.858 across T=3/5/7/10. The holdout sits slightly above
-the selection-fold validation (~0.77 at T=5) because the final model trains on an extra year; the consistent across threshold performance and the NPS external check are the real generalization evidence.
+After the fix, the honest protocol is two phases — select on 2023-2024 -> 2025, then refit on 2023-2025 and score 2026 once. Final holdout AUC is 0.807 at T=5, 0.787 / 0.807 / 0.827 / 0.858 across T=3/5/7/10. The holdout sits slightly above the selection-fold validation (~0.77 at T=5) because the final model trains on an extra year; the consistent across-threshold performance and the NPS external check are the real generalization evidence.
 
 ## 7. The Leakage Audit
 
@@ -331,15 +328,15 @@ A v2 audit would add at least the first two of these.
 
 ### 7.5 The leak this audit missed — and the fix
 
-**Fold-scoped encoder fitting (leak found and fixed).** 
-An internal audit caught that the training-class aggregates — engineer historical mean (the model's strongest feature), tier / channel / division / month means, city and state target encoding, and the segment delivery median — were originally fit on the full 2023-2025 cohort and then split into train (2023-2024) and validation (2025) without refitting. That let 2025 information reach the validation rows and inflated the validation metrics (and the apparent validation-to-holdout gap). 
+**Fold-scoped encoder fitting (leak found and fixed).**
+An internal audit caught that the training-class aggregates — engineer historical mean (the model's strongest feature), tier / channel / division / month means, city and state target encoding, and the segment delivery median — were originally fit on the full 2023-2025 cohort and then split into train (2023-2024) and validation (2025) without refitting. That let 2025 information reach the validation rows and inflated the validation metrics (and the apparent validation-to-holdout gap).
 
 The fix scopes every aggregate to data available before the rows it is applied to: for model selection, aggregates are fit on the 2023-2024 fold and validated on 2025; for the final number, a select-then-refit protocol refits the aggregates and retrains on all of 2023-2025, then scores the locked 2026 holdout exactly once.
 
-**What the five-test audit did not catch.** 
+**What the five-test audit did not catch.**
 The audit compares training against the 2026 holdout, so it is blind to a leak confined to the *validation fold*: the leaked aggregates were "train-only" relative to 2026, so all five tests passed while 2025 was still bleeding into validation. The methodology already described fold-correct fitting ("training-period only"); the implementation fit more broadly than that. The mismatch was caught by a fold-scoping ablation, not by the audit — and the fix made the implementation match the documented discipline.
 
-A defensible audit therefore needs a sixth test: refit every encoder per fold and assert the validation metric is stable. That is the first addition planned for av2 audit.
+A defensible audit therefore needs a sixth test: refit every encoder per fold and assert the validation metric is stable. That is the first addition planned for a v2 audit.
 
 ## 8. Operational Translation
 
@@ -395,8 +392,7 @@ The most defensible piece of the prioritization output is the NPS post-hoc check
 | Very high (80-100% predicted late) | 57.4% | 28.8% |
 | **Gap** | **5.2pp** | **3.8pp** |
 
-The 5.2-point promoter gap and 3.8-point detractor gap are computed out-of-sample — 2025 NPS responders scored by the
-2023-2024 selection model (which never saw 2025), with NPS never entering the model. An earlier build reported a wider gap; that version was inflated by the encoder leak corrected in Section 7.5. The signal still cannot be tuned from inside the pipeline (NPS is not a feature).
+The 5.2-point promoter gap and 3.8-point detractor gap are computed out-of-sample — 2025 NPS responders scored by the 2023-2024 selection model (which never saw 2025), with NPS never entering the model. An earlier build reported a wider gap; that version was inflated by the encoder leak corrected in Section 7.5. The signal still cannot be tuned from inside the pipeline (NPS is not a feature).
 
 ---
 
