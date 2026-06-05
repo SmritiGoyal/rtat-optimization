@@ -216,7 +216,7 @@ The production LightGBM classifier configuration:
 ```python
 {
     "objective": "binary",
-    "metric": ["binary_logloss", "auc"],
+    "metric": ["auc", "binary_logloss"],   # AUC first; early stopping watches it
     "n_estimators": 500,
     "learning_rate": 0.05,
     "max_depth": 6,
