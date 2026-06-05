@@ -104,19 +104,19 @@ The flag columns arrive in heterogeneous formats (`Y` / `Yes` / `1` / `TRUE` / `
 
 ## Service channel glossary
 
-The `Channel` column in master data contains seven values, ordered by mean RTAT in training data:
+The `Channel` column in master data contains seven values. The `channel_risk_ordinal` encoding (1-7) is ordered by **late rate at T=5** in training data, which differs slightly from ordering by mean RTAT — Premier Partner has a lower mean RTAT than ASC but a higher T=5 late rate, so its risk ordinal sits above ASC.
 
-| Channel | Type | Approx. mean RTAT |
-|---|---|---|
-| `DMS` | Direct — in-house technician network | ~6.0 days |
-| `DMS2` | Direct — secondary in-house network | ~6.5 days |
-| `ASC` | Authorized Service Center | ~8.5 days |
-| `Premier Partner` | High-volume authorized third-party partner | ~10.5 days |
-| `ASD` | Authorized Service Distributor (regional) | ~13.5 days |
-| `AE` | Authorized Engineer (individual credentialed) | ~16.5 days |
-| `SPO` | Service Partner Other (residual) | ~20.8 days |
+| Channel | Type | Approx. mean RTAT | Risk ordinal |
+|---|---|---:|---:|
+| `DMS` | Direct — in-house technician network | ~6.0 days | 1 |
+| `DMS2` | Direct — secondary in-house network | ~7.2 days | 2 |
+| `ASC` | Authorized Service Center | ~10.2 days | 3 |
+| `Premier Partner` | High-volume authorized third-party partner | ~9.7 days | 4 |
+| `ASD` | Authorized Service Distributor (regional) | ~15.3 days | 5 |
+| `AE` | Authorized Engineer (individual credentialed) | ~19.9 days | 6 |
+| `SPO` | Service Partner Other (residual) | ~20.8 days | 7 |
 
-The pipeline encodes these to `channel_risk_ordinal` 1-7 in this exact order. Unknown channels fall back to ordinal 3 (ASC-level risk).
+The pipeline encodes these to `channel_risk_ordinal` 1-7 in the risk-ordinal order above (by T=5 late rate). Note Premier Partner's ~9.7-day mean sits just below ASC's ~10.2 despite its higher risk ordinal — the two orderings differ because the ordinal is by late rate, not mean. Unknown channels fall back to ordinal 3 (ASC-level risk).
 
 ## Cohort filter
 
@@ -144,7 +144,7 @@ mkdir -p data/raw
 # 2. Run the full pipeline (one stage at a time)
 python ingestion.py             # Steps 1-4: master + parts + reclaim → integrated parquet
 python eda.py                   # Step 5: first-pass EDA, hypothesis list, charts
-python feature_engineering.py   # Step 6: 41 features, leakage review, data dictionary
+python feature_engineering.py   # Step 6: feature build (40 numeric + 1 categorical), leakage review, data dictionary
 python modeling.py              # Step 7: 7 classifiers + 8 regressors, threshold sweep
 python prioritization.py        # Step 8: priority matrix, 4-lever decomposition
 python leakage_audit.py         # Step 9: 5-test feature audit
@@ -154,7 +154,7 @@ All artifacts are written under `outputs/`:
 - `outputs/interim/` — Step 1-4 parquets and CSVs
 - `outputs/eda/` — 11 stats tables + 10 PNG charts
 - `outputs/features/` — feature_train.parquet, feature_holdout.parquet, leakage review
-- `outputs/models/` — 5 LightGBM/XGBoost model pickles + 6 result CSVs + leakage audit
+- `outputs/models/` — LightGBM/XGBoost model pickles + result CSVs + leakage audit
 - `outputs/prioritization/` — priority matrix, lever decomposition, NPS validation
 
 All intermediate artifacts are gitignored. See [`outputs/README.md`](../outputs/README.md) for the artifact catalog.
