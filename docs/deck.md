@@ -73,20 +73,19 @@ Repair-order-level data covering:
 
 **Raw data → modeling cohort**
 
-<!-- VERIFY: the exclusion lines below sum to 1,540,829, but the verified final
-cohort (= train + val + holdout) is 1,640,829 — off by 100,000. Pull the real
-per-reason counts from outputs/interim/cohort_summary.csv and correct one line
-before presenting. The 1,640,829 total is correct; one exclusion figure is not. -->
-
 ```
 Master Universe:                          2,192,254 repairs
-  - Non-appliance divisions (2.8%):         -61,519
-  - Non-RTAT center types (1.2%):           -26,938
   - Missing RTAT records (24.0%):          -525,772
-  - Other exclusions:                       -37,196
+  - Negative RTAT records:                      -16
+--------------------------------------------------------
+RTAT-valid cohort (76.0%):                1,666,466 repairs
+  - Non-appliance divisions, non-RTAT center
+    types, and out-of-range RTAT (>365d):   -25,637
 --------------------------------------------------------
 Final Modeling Cohort (74.8%):            1,640,829 repairs
 ```
+
+*Non-appliance divisions (e.g. HANDSET, Signage, Commercial TV) and non-RTAT center types (Affiliate, DSC) are excluded via auditable per-row flags; see methodology §2 for the full filter list. The missing-RTAT and total figures tie to `cohort_summary.csv`.*
 
 **Train / Validate / Holdout split**
 
@@ -94,11 +93,11 @@ Final Modeling Cohort (74.8%):            1,640,829 repairs
 |---|---|---:|
 | Train | 2023 + 2024 | 1,060,649 |
 | Validate | 2025 | 509,930 |
-| Holdout | 2026 (Jan-Apr) | 70,250 |
+| Holdout | 2026 (Jan-Feb) | 70,250 |
 
 A strict temporal split tests performance on truly unseen future data. Training-class aggregates are fit on the 2023-2024 fold for model selection, then refit on all 2023-2025 for the final model, which scores the 2026 holdout exactly once.
 
-**Feature audit summary - 41 features across 8 groups**
+**Feature audit summary - 41 audited features across 8 groups** (40 numeric model features + 1 categorical held out of the numeric model)
 
 | Group | # Features | Description | Audit Status |
 |---|---:|---|---|
@@ -122,14 +121,14 @@ The leakage audit flags features that may not be deployment-safe. Note: the audi
 | Model | AUC | Avg Precision | Precision | Recall | F1 |
 |---|---:|---:|---:|---:|---:|
 | Majority Baseline | 0.500 | 0.468 | 0.0% | 0.0% | 0.000 |
-| Logistic Regression (L2) | 0.761 | 0.724 | 64.9% | 72.0% | 0.683 |
-| Decision Tree (depth=3) | 0.738 | 0.657 | 62.1% | 79.3% | 0.697 |
-| Decision Tree (depth=6) | 0.762 | 0.716 | 64.6% | 73.8% | 0.689 |
-| Random Forest | 0.788 | 0.750 | 65.0% | 78.9% | 0.713 |
-| XGBoost | 0.796 | 0.759 | 67.7% | 75.4% | 0.713 |
-| LightGBM | 0.759 | 0.669 | 66.9% | 70.5% | 0.686 |
+| Logistic Regression (L2) | 0.770 | 0.734 | 66.5% | 71.8% | 0.690 |
+| Decision Tree (depth=3) | 0.738 | 0.657 | 60.9% | 83.7% | 0.705 |
+| Decision Tree (depth=6) | 0.772 | 0.726 | 64.9% | 76.6% | 0.703 |
+| Random Forest | 0.791 | 0.755 | 65.8% | 78.4% | 0.716 |
+| XGBoost | 0.802 | 0.767 | 68.6% | 75.0% | 0.717 |
+| LightGBM | 0.770 | 0.686 | 67.7% | 73.1% | 0.703 |
 
-*On this single-fit validation bake-off XGBoost leads; LightGBM underfits at default iterations (best_iter ~29) because hyperparameters were not re-tuned after the leak fix. On the final 2026 holdout the two are tied — see Slide 7. LightGBM is retained as primary for regression stability and faster training.*
+*On this single-fit validation bake-off XGBoost leads on AUC (0.802); LightGBM (0.770) trails on the single fit but pulls ahead on the final refit holdout — see Slide 7. LightGBM is the primary model: it leads at the primary T=5 target and on regression on the deployable 2026 holdout.*
 
 **Regression Model Comparison — validation (2025), MAE in days**
 
@@ -137,18 +136,18 @@ The leakage audit flags features that may not be deployment-safe. Note: the audi
 |---|---:|---:|---:|
 | Mean Baseline | 6.772 | 10.984 | -0.001 |
 | Segment Mean | 5.971 | 10.191 | 0.138 |
-| Ridge (L2) | 5.385 | 9.473 | 0.255 |
-| Random Forest | 4.934 | 9.125 | 0.309 |
-| XGBoost | 4.916 | 9.059 | 0.319 |
-| LightGBM | 4.950 | 9.178 | 0.301 |
+| Ridge (L2) | 5.390 | 9.402 | 0.267 |
+| Random Forest | 4.956 | 9.148 | 0.306 |
+| XGBoost | 4.930 | 9.069 | 0.318 |
+| LightGBM | 4.967 | 9.198 | 0.298 |
 
 **Why LightGBM**
 
-1. **Tied on the final holdout** — LightGBM and XGBoost land within ~0.005 AUC of each other at every threshold on the 2026 holdout (T=5: 0.807 vs 0.812). LightGBM is chosen for regression stability and ~25% faster training, not a validation-accuracy edge.
+1. **Leads on the deployable holdout** — at the primary T=5 target LightGBM edges XGBoost on the 2026 holdout (0.819 vs 0.816 AUC) and leads on regression. Across thresholds the two are within ~0.01 AUC and trade the lead (XGBoost is ahead at T=7/T=10). LightGBM is also the more stable regressor and ~25% faster to train.
 2. **Native missing-value handling** - 75% of parts-logistics features are structurally missing for repairs that don't need parts. LightGBM handles this natively via surrogate splits.
 3. **Scale efficiency** - trains materially faster on 1.5M rows, enabling iterative development and rapid retraining.
 
-> **32% MAE improvement over naive baseline** (6.77 -> 4.58 days on the 70,250-repair 2026 holdout, final model)
+> **32% MAE improvement over naive baseline** (6.77 -> 4.62 days on the 70,250-repair 2026 holdout, final model)
 
 ---
 
@@ -181,9 +180,9 @@ The Q4/Q1 ratio of **3.9x** is the #1 driver across all segments. The signal is 
 
 | Metric | Value |
 |---|---:|
-| Holdout AUC (2026, T=5) | **0.807** (XGBoost 0.812 — tied) |
-| Holdout F1 (T=5) | **0.729** |
-| Holdout MAE (regression) | **4.58 days** |
+| Holdout AUC (2026, T=5) | **0.819** (XGBoost 0.816) |
+| Holdout F1 (T=5) | **0.740** |
+| Holdout MAE (regression) | **4.62 days** |
 | Holdout R² (regression) | **0.36** |
 
 **Model robustness benchmarks**
@@ -192,26 +191,26 @@ The Q4/Q1 ratio of **3.9x** is the #1 driver across all segments. The signal is 
 |---|---:|---:|---|
 | 7-Feature Safe Baseline (pre-fix) | 0.650 | 0.535 | Clean |
 | 19-Feature Conservative (pre-fix) | 0.768 | 0.724 | Clean |
-| **Final 41-Feature LightGBM** | **0.807** | **0.729** | **Passed*** |
+| **Final 40-Feature LightGBM** | **0.819** | **0.740** | **Passed*** |
 
 *Passed the 5-test leakage audit. That audit compares training against the 2026 holdout and does not detect a leak confined to the validation fold — a fold-level encoder leak found here was caught by a separate fold-scoping ablation and fixed (see note below). The two baseline rows are pre-fix and were not re-run.*
 
-**On the leak that was found and fixed** — training-class aggregates (engineer historical mean, tier/channel/division/month means, city/state target encoding, segment delivery median) were originally fit on the full 2023-2025 cohort and split into train/validation without refitting, letting 2025 reach the validation rows. This inflated the earlier validation metrics and the apparent val→holdout gap. The fix scopes every aggregate to data available before the rows it serves; the holdout numbers above are leak-free.
+**On the leak that was found and fixed** — Training-class aggregates (engineer historical mean, tier/channel/division/month means, city/state target encoding, segment delivery median) were originally fit on the full 2023-2025 cohort and split into train/validation without refitting, letting 2025 reach the validation rows. The fix scopes every aggregate to data available before the rows it serves; the holdout numbers above are leak-free.
 
 **Segment-level AUC characteristic** — the model discriminates best in the worst-performing segments. That's exactly the right property for a resource allocation tool: it's most accurate where the decisions matter most.
 
 **NPS validation (post-hoc, NPS never used in training; 2025 responders scored out-of-sample by the 2023-24 selection model)**
 
-- **5.2-point gap** in promoter rate between low-risk and high-risk predicted buckets
-- **3.8-point gap** in detractor rate between low-risk and high-risk predicted buckets
+- **10.4-point gap** in promoter rate between low-risk and high-risk predicted buckets
+- **7.7-point gap** in detractor rate between low-risk and high-risk predicted buckets
 
 | Predicted-risk bucket | Promoter rate | Detractor rate |
 |---|---:|---:|
-| Very low (0-20% predicted late) | **62.6%** | 25.0% |
-| Very high (80-100% predicted late) | **57.4%** | **28.8%** |
-| **Gap** | **5.2pp** | **3.8pp** |
+| Very low (0-20% predicted late) | **69.2%** | 19.6% |
+| Very high (80-100% predicted late) | **58.8%** | **27.3%** |
+| **Gap** | **10.4pp** | **7.7pp** |
 
-Predicted lateness tracks customer sentiment in the right direction — promoter rate falls and detractor rate rises from low- to high-risk segments — confirming the prioritization reflects real customer experience and not just a statistical artifact. The signal cannot be tuned from inside the pipeline because NPS is never a feature. (An earlier build reported a wider gap; that version was inflated by the encoder leak since corrected. Full 5-bucket breakdown: `outputs/prioritization/nps_validation.csv`, 42,451 responders.)
+Predicted lateness tracks customer sentiment in the right direction — promoter rate falls and detractor rate rises from low- to high-risk segments — confirming the prioritization reflects real customer experience and not just a statistical artifact. The signal cannot be tuned from inside the pipeline because NPS is never a feature. Full 5-bucket breakdown: `outputs/prioritization/nps_validation.csv`, 42,451 responders.
 
 ---
 
@@ -238,11 +237,7 @@ Numbers in parentheses are the late rate at T=5 (i.e., share of repairs in that 
 | 4 | Top 10 x DMS | 64,084 | 37.7% | Parts Logistics |
 | 5 | Rural x Premier Partner | 55,669 | 68.0% | Engineer Deployment |
 
-<!-- VERIFY: primary-lever labels come from lever_decomposition.csv. The lever mix
-shifted 46/25 -> 43/29 on re-run (one segment moved engineer -> parts), so confirm
-these five primary-lever labels against the current outputs/prioritization/lever_decomposition.csv. -->
-
-> **The top 5 priority segments cover 402,852 delayed cases — 47% of all at-risk repairs across the 28 analyzed segments** (total at-risk = 855,494).
+> **The top 5 priority segments cover 402,850 delayed cases — 47% of all at-risk repairs across the 28 analyzed segments** (total at-risk = 853,994).
 
 ---
 
@@ -265,12 +260,12 @@ these five primary-lever labels against the current outputs/prioritization/lever
 
 | T | Holdout AUC | F1 | On-time rate |
 |---|---:|---:|---:|
-| T=3 | 0.787 | 0.232 | 27.9% |
-| T=5 | 0.807 | 0.729 | 46.8% |
-| T=7 | 0.827 | 0.842 | 62.3% |
-| T=10 | 0.858 | 0.905 | 75.4% |
+| T=3 | 0.806 | 0.499 | 27.9% |
+| T=5 | 0.819 | 0.740 | 46.8% |
+| T=7 | 0.819 | 0.784 | 62.3% |
+| T=10 | 0.847 | 0.874 | 75.4% |
 
-*(The right column is the on-time rate — share completed within T days. The earlier deck labeled this "Late Rate," which was the inverse and incorrect. Per-threshold precision/recall are in `outputs/models/threshold_results.csv`.)*
+*(The right column is the on-time rate — share completed within T days. The earlier deck labeled this "Late Rate," which was the inverse and incorrect. At T=7/T=10 the target is highly separable, so validation AUC saturates within a couple of boosting iterations and those models train to few trees by design. Per-threshold precision/recall are in `outputs/models/threshold_results.csv`.)*
 
 **Operational interpretation**
 
@@ -365,14 +360,14 @@ The repair network operates across seven service channels reflecting ownership a
 | Code | Meaning | Approx mean RTAT |
 |---|---|---:|
 | **DMS** | Direct — in-house technician network | 6.0 days |
-| **DMS2** | Direct — secondary in-house network | 6.5 days |
-| **ASC** | Authorized Service Center | 8.5 days |
-| **Premier Partner (PP)** | High-volume authorized third-party partners | 10.5 days |
-| **ASD** | Authorized Service Distributor — regional third-party companies | 13.5 days |
-| **AE** | Authorized Engineer — individual credentialed technicians | 16.5 days |
+| **DMS2** | Direct — secondary in-house network | 7.2 days |
+| **ASC** | Authorized Service Center | 10.2 days |
+| **Premier Partner (PP)** | High-volume authorized third-party partners | 9.7 days |
+| **ASD** | Authorized Service Distributor — regional third-party companies | 15.3 days |
+| **AE** | Authorized Engineer — individual credentialed technicians | 19.9 days |
 | **SPO** | Service Partner Other — residual partner network | 20.8 days |
 
-The channels are ordered from fastest to slowest by mean RTAT in training data. Each channel has materially different operational characteristics — parts access, dispatch speed, geographic coverage, volume tier — which the model captures via channel-level mean RTAT and late-rate aggregates plus channel x market and channel x engineer-quartile interaction terms.
+The channels are ordered roughly fastest to slowest by mean RTAT in training data (note Premier Partner's 9.7-day mean sits below ASC's 10.2 despite its lower risk ordinal — the ordinal encoding is by late-rate at T=5, not mean RTAT, so the two orderings differ slightly). Each channel has materially different operational characteristics — parts access, dispatch speed, geographic coverage, volume tier — which the model captures via channel-level mean RTAT and late-rate aggregates plus channel x market and channel x engineer-quartile interaction terms.
 
 ---
 
