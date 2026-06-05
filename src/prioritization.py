@@ -45,6 +45,8 @@ import lightgbm as lgb  # noqa: F401  (only needed if running standalone)
 import numpy as np
 import pandas as pd
 
+import feature_engineering as fe  # canonical MODEL_FEATURES (single source of truth)
+
 warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
 
@@ -112,24 +114,15 @@ CHANNEL_MAP: dict[str, int] = {
 }
 
 
-# Extended features needed for prediction (must match modeling.py's
-# EXTENDED_FEATURES). Kept here as a literal list so this module can
-# run standalone without importing from modeling.py.
+# Extended features for prediction. MUST match modeling.py's EXTENDED_FEATURES
+# exactly, or predict_proba will fail a shape check / misalign. Derived from the
+# single source of truth (feature_engineering.MODEL_FEATURES) minus the one
+# non-numeric column, identical to modeling.py — so this list can never drift
+# from the trained models again.
+_NON_NUMERIC_MODEL_FEATURES: tuple[str, ...] = ("parts_shipping_tier",)
+
 EXTENDED_FEATURES: list[str] = [
-    "market_tier_ordinal", "tier_mean_rtat", "tier_late_rate5",
-    "city_target_enc", "state_target_enc",
-    "channel_risk_ordinal", "channel_mean_rtat", "channel_late_rate5",
-    "month_of_year", "quarter", "is_peak_month", "month_mean_rtat",
-    "div_mean_rtat", "div_late_rate5", "is_ter_repair",
-    "engineer_hist_mean_rtat", "engineer_quartile",
-    "has_parts_reclaim", "parts_count_reclaim", "parts_complexity_score",
-    "is_reclaim", "is_same_symptom_reclaim",
-    "ordered_via_dms", "parts_delivery_tier_known",
-    "geo_channel_risk", "rural_parts_flag", "eng_channel_risk",
-    "parts_line_count", "parts_order_qty_sum", "parts_multi_line_flag",
-    "parts_has_arrival_flag", "parts_has_shipment_flag",
-    "parts_delivery_tier", "parts_order_to_arrival_days_safe",
-    "parts_truncation_flag", "reclaim_period_days", "is_sealed_repair",
+    f for f in fe.MODEL_FEATURES if f not in _NON_NUMERIC_MODEL_FEATURES
 ]
 
 
