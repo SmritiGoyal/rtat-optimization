@@ -1,6 +1,6 @@
 # Features
 
-This document describes the 41 features used by the RTAT prediction model. Each feature is documented with:
+This document describes the feature set used by the RTAT prediction model: **40 numeric model features**, plus one categorical feature (`parts_shipping_tier`) that is documented and leakage-audited but held out of the numeric model. Each feature is documented with:
 
 - **Source** — which raw table or engineered upstream column it draws from
 - **Formula / construction** — how the value is computed
@@ -24,7 +24,7 @@ The pipeline includes one POST_CLOSE feature in the dataset for audit reference 
 
 ## Feature spec at a glance
 
-The 41 features split into eight groups defined in the `FEATURE_SPEC` constant:
+`MODEL_FEATURES` (the leakage-reviewed list in `feature_engineering.py`) contains 41 entries split into eight groups defined in the `FEATURE_SPEC` constant. Of these, 40 are numeric and feed the trained LightGBM/XGBoost models; the one categorical-string column (`parts_shipping_tier`) is documented and audited but excluded from the numeric model:
 
 | Group | Count | Examples |
 |---|---:|---|
@@ -36,9 +36,9 @@ The 41 features split into eight groups defined in the `FEATURE_SPEC` constant:
 | Reclaim | 6 | `has_parts_reclaim`, `is_reclaim`, `parts_complexity_score` |
 | DMS | 11 | `ordered_via_dms`, `parts_line_count`, `parts_delivery_tier`, `seg_delivery_days_hist` |
 | Interactions | 3 | `geo_channel_risk`, `rural_parts_flag`, `eng_channel_risk` |
-| **Total in MODEL_FEATURES** | **41** | (`parts_order_to_arrival_days_safe` is in the dataset but excluded from the model) |
+| **Total in MODEL_FEATURES** | **41** | 40 numeric + 1 categorical (`parts_shipping_tier`). `parts_order_to_arrival_days_safe` is in the dataset but excluded from MODEL_FEATURES entirely. |
 
-The two-track CORE / EXTENDED design splits these 41 by missingness pattern: CORE (27 features) has 0% missing and is safe for linear models with median fill; EXTENDED (37 features) adds DMS-dependent features (~75% missingness) for tree models that handle nulls natively.
+The two-track CORE / EXTENDED design splits the 40 numeric features by missingness pattern: CORE (31 features) is low-missingness and safe for linear models with median fill; EXTENDED (the full 40 numeric) adds DMS-dependent features (~75% missingness) for tree models that handle nulls natively.
 
 ---
 
@@ -272,7 +272,7 @@ Repeat-visit features. `reclaim_period_days` is the days since the prior visit; 
 | `parts_multi_line_flag` | Int8 | 1 if more than one part line |
 | `parts_has_arrival_flag` | Int8 | 1 if at least one part has recorded arrival |
 | `parts_has_shipment_flag` | Int8 | 1 if at least one part has recorded shipment |
-| `parts_shipping_tier` | categorical | OVERNIGHT / TWO_DAY / GROUND / PICKUP / OTHER / UNKNOWN |
+| `parts_shipping_tier` | categorical | OVERNIGHT / TWO_DAY / GROUND / PICKUP / OTHER / UNKNOWN. Documented and audited, but held out of the numeric model (the one non-numeric MODEL_FEATURES entry). |
 | `parts_truncation_flag` | float64 | 1 if record from truncated source sheet (quality metadata) |
 
 **Timing:** INTAKE or POST_INTAKE — all known within hours of repair opening.
@@ -374,7 +374,9 @@ Only `OnTime_5` and `target_days` are used as primary modeling targets in `model
 
 ---
 
-## Summary table — all 41 model features
+## Summary table — MODEL_FEATURES
+
+The 40 numeric features below feed the trained LightGBM/XGBoost models. The one categorical entry (`parts_shipping_tier`, #34) is part of `MODEL_FEATURES` and is leakage-audited, but is held out of the numeric model — the boosters here train on the 40 numeric columns.
 
 | # | Feature | Group | Timing | Deployment-safe? |
 |---:|---|---|---|---|
@@ -411,7 +413,7 @@ Only `OnTime_5` and `target_days` are used as primary modeling targets in `model
 | 31 | `parts_multi_line_flag` | DMS | POST_INTAKE | ✅ |
 | 32 | `parts_has_arrival_flag` | DMS | POST_INTAKE | ✅ |
 | 33 | `parts_has_shipment_flag` | DMS | POST_INTAKE | ✅ |
-| 34 | `parts_shipping_tier` | DMS | POST_INTAKE | ✅ |
+| 34 | `parts_shipping_tier` | DMS | POST_INTAKE | ✅ (categorical — audited, held out of the numeric model) |
 | 35 | `parts_delivery_tier` | DMS | POST_CLOSE conditional | ⚠ Conditional |
 | 36 | `parts_delivery_tier_known` | DMS | POST_INTAKE | ✅ |
 | 37 | `seg_delivery_days_hist` | DMS | TRAINING | ✅ |
@@ -419,6 +421,8 @@ Only `OnTime_5` and `target_days` are used as primary modeling targets in `model
 | 39 | `geo_channel_risk` | Interactions | INTAKE | ✅ |
 | 40 | `rural_parts_flag` | Interactions | INTAKE | ✅ |
 | 41 | `eng_channel_risk` | Interactions | MEDIUM | ⚠ Verify |
+
+The 40 numeric model features are rows 1-33 and 35-41 (every row above except the categorical `parts_shipping_tier` at #34).
 
 **Plus, in the dataset but EXCLUDED from MODEL_FEATURES:**
 
