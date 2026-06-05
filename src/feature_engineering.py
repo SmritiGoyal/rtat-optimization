@@ -4,21 +4,32 @@ feature_engineering.py
 Step 6: Feature Engineering for the RTAT pipeline.
 
 Builds the model feature matrix from the integrated master table produced
-by ``ingestion.py``. All encodings and aggregates are fit on the training
-years (2023-2025) only and applied to the 2026 holdout via merge — never
-re-fit on holdout data. This is the single most important leakage-prevention
-discipline in the pipeline.
+by ``ingestion.py``. All encodings and aggregates are fit fold-scoped — on
+the 2023-2024 training fold for model selection, then refit on all 2023-2025
+for the final model — and applied to the validation rows and the 2026 holdout
+via merge, never re-fit on the data the model is scored against. This
+fold-scoping is the single most important leakage-prevention discipline in
+the pipeline.
 
-Subsections:
+(An earlier version fit these aggregates on the full 2023-2025 cohort before
+the train/validation split, leaking 2025 into validation; that is the leak
+this fold-scoped design fixes.)
+
+Per-fold feature chain — in ``_engineer_all()``, run once per pass
+(Pass 1: fit on 2023-2024, apply to train + 2025 val; Pass 2: fit on
+2023-2024, apply to the 2026 holdout):
     6A: Fix weekend close (Warranty_Closed_Date is YYYYMMDD int)
     6B: Geography features  (Market_Category ordinal, tier stats)
     6C: Channel features    (Channel ordinal, channel stats)
-    6D: Engineer features   (quartile, missing proxy flag)
+    6D: Engineer features   (fold-scoped historical mean, quartile, missing proxy flag)
     6E: Parts features      (delivery tier, seg_delivery_days_hist, complexity)
     6F: Product features    (division stats, repair-type flags)
     6G: Seasonality         (month aggregates, peak month flag)
     6H: Target encoding     (city/state with Bayesian smoothing k=30)
     6I: Interactions        (geo × channel, rural × parts, eng × channel)
+
+Assembly, audit, and save — in ``run_feature_engineering()``, after the
+two passes are reassembled:
     6J: Final feature spec  (FEATURE_SPEC dict, MODEL_FEATURES list)
     6K: Missingness summary
     6L: Leakage review
@@ -26,9 +37,16 @@ Subsections:
     6N: Save feature tables
     6O: Final summary
 
+Two entry points:
+    run_feature_engineering()        — fold-scoped selection build (fit on
+                                       2023-2024, apply to 2025 val + 2026)
+    run_feature_engineering_final()  — final build (fit on all 2023-2025)
+
 Output artifacts under ``outputs/features/``:
-    feature_train.parquet
-    feature_holdout.parquet
+    feature_train.parquet            (2023-2025, aggregates fit on 2023-2024 fold)
+    feature_holdout.parquet          (2026, aggregates fit on 2023-2024 fold)
+    feature_train_final.parquet      (2023-2025, aggregates fit on all 2023-2025)
+    feature_holdout_final.parquet    (2026, aggregates fit on all 2023-2025)
     feature_spec.csv
     leakage_review.csv
     data_dictionary.csv
@@ -215,9 +233,10 @@ def add_engineer_features(
     """Add engineer quartile + missing-proxy flag.
 
     Quartile thresholds are computed from training's ``engineer_hist_mean_rtat``
-    distribution (which is itself a training-only aggregate from Step 4C).
-    Engineers with no historical record get pd.NA quartile, surfaced by
-    the ``engineer_proxy_missing`` flag for the model.
+    distribution (which is recomputed fold-scoped by ``add_engineer_mean()``
+    immediately upstream in ``_engineer_all`` — no longer the ingestion
+    Step 4C value). Engineers with no historical record get pd.NA quartile,
+    surfaced by the ``engineer_proxy_missing`` flag for the model.
 
     Returns:
         (train, holdout, quartile_thresholds) — DataFrames plus the
@@ -249,6 +268,36 @@ def add_engineer_features(
         ).astype("Int8")
 
     return train, holdout, {"q1": float(q1), "q2": float(q2), "q3": float(q3)}
+
+
+def add_engineer_mean(
+        train: pd.DataFrame,
+        holdout: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
+    """Recompute engineer_hist_mean_rtat on the FIT cohort (first arg) only.
+
+    Mirrors ingestion Step 4C exactly
+    (``groupby("SVC_Engineer_Code")["target_days"].mean()``) but fits on the
+    rows passed here — which the caller scopes to the appropriate fit cohort
+    (the 2023-2024 fold for model selection; all 2023-2025 for the final
+    build). Drops any engineer_hist_mean_rtat carried in from ingestion (fit
+    on the full 2023-2025 cohort) and replaces it, so the quartile binning in
+    add_engineer_features() reads the fold-correct value.
+
+    Engineers absent from the fit cohort get NaN, surfaced downstream by
+    engineer_proxy_missing.
+    """
+    for df in (train, holdout):
+        df.drop(columns=["engineer_hist_mean_rtat"], errors="ignore", inplace=True)
+
+    eng_mean = (
+        train.groupby("SVC_Engineer_Code")["target_days"]
+        .mean()
+        .rename("engineer_hist_mean_rtat")
+    )
+    train = train.merge(eng_mean, on="SVC_Engineer_Code", how="left")
+    holdout = holdout.merge(eng_mean, on="SVC_Engineer_Code", how="left")
+    return train, holdout, eng_mean
 
 
 # =====================================================================
@@ -696,8 +745,11 @@ def build_missingness_summary(
 
 LEAKAGE_REVIEW_ROWS: list[dict] = [
     {"feature": "engineer_hist_mean_rtat", "risk": "LOW",
-     "reason": "Computed on training years 2023-2025 only. Engineer history exists "
-               "at prediction time — equivalent to credit score history."},
+     "reason": "Recomputed fold-scoped (fit on the 2023-2024 training fold for "
+               "selection; on 2023-2025 for the final model), merged onto the rows "
+               "it serves — its own fit never includes the validation or holdout "
+               "years. Engineer history exists at prediction time, equivalent to a "
+               "credit-score history."},
     {"feature": "tier_mean_rtat / tier_late_rate5", "risk": "LOW",
      "reason": "Training aggregate. Applied to holdout via merge."},
     {"feature": "channel_mean_rtat / channel_late_rate5", "risk": "LOW",
@@ -822,12 +874,15 @@ DATA_DICTIONARY_ROWS: list[dict] = [
     # Engineer
     {"feature": "engineer_hist_mean_rtat", "source": "Engineered", "type": "float32",
      "model_use": "feature", "deployment_safe": "YES",
-     "description": "Historical mean RTAT per engineer on 2023-2025 training. "
-                    "Strongest single feature (22% LightGBM importance). 4x "
+     "description": "Historical mean RTAT per engineer, recomputed fold-scoped "
+                    "(2023-2024 fold for selection; 2023-2025 for the final model). "
+                    "Strongest single feature (~22% LightGBM importance). 4x "
                     "RTAT gap Q1 vs Q4. Fully known at prediction time."},
     {"feature": "engineer_quartile", "source": "Engineered", "type": "Int8",
      "model_use": "feature", "deployment_safe": "YES",
-     "description": "Engineer binned 1–4 from hist_mean_rtat. Q1≤5.5d, Q4≥11.7d."},
+     "description": "Engineer binned 1–4 from hist_mean_rtat. Q1≤5.5d, Q4≥11.7d "
+                    "(final-model fit; the 2023-2024 selection-fold cutpoints "
+                    "differ slightly)."},
     {"feature": "engineer_proxy_missing", "source": "Engineered", "type": "Int8",
      "model_use": "feature", "deployment_safe": "YES",
      "description": "1 if engineer_hist_mean_rtat is null (~0.04% of repairs)."},
@@ -985,83 +1040,120 @@ def build_feature_spec_table(train: pd.DataFrame) -> pd.DataFrame:
 # MAIN ORCHESTRATION
 # =====================================================================
 
-def run_feature_engineering(cfg: FeatureConfig | None = None) -> dict:
-    """Run the full Step 6 feature engineering end-to-end.
+def _engineer_all(
+        train: pd.DataFrame,
+        holdout: pd.DataFrame,
+        cfg,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Run the per-fold feature chain (subsections 6A-6I), FITTING every
+    aggregate on `train` and applying to both `train` and the second frame.
+    Returns (train, holdout, stats), where `stats` collects the fitted
+    tables for logging/documentation.
 
-    Reads ``master_train.parquet`` and ``master_holdout.parquet`` from
-    ``cfg.interim_dir`` (produced by ``ingestion.py``), applies all
-    feature transformations, and writes:
+    Called twice by run_feature_engineering: once to fit on the 2023-2024
+    fold and transform train + 2025 validation, once to fit on the same fold
+    and transform the 2026 holdout. run_feature_engineering_final calls it
+    once, fitting on all 2023-2025.
+    """
+    train = fix_date_features(train)  # 6A
+    holdout = fix_date_features(holdout)
+
+    train, holdout, tier_stats = add_geography_features(train, holdout)  # 6B
+    train, holdout, channel_stats = add_channel_features(train, holdout)  # 6C
+    train, holdout, _eng_mean = add_engineer_mean(train, holdout)  # NEW
+    train, holdout, eng_q_thresholds = add_engineer_features(train, holdout)  # 6D
+    train, holdout, seg_delivery = add_parts_features(train, holdout)  # 6E
+    train, holdout, div_stats = add_product_features(train, holdout)  # 6F
+    train, holdout, peak_months = add_seasonality_features(train, holdout)  # 6G
+    train, holdout, enc_diag = add_target_encoded_features(train, holdout, cfg)  # 6H
+    train, holdout = add_interaction_features(train, holdout)  # 6I
+
+    stats = {
+        "tier_stats": tier_stats,
+        "channel_stats": channel_stats,
+        "eng_q_thresholds": eng_q_thresholds,
+        "seg_delivery": seg_delivery,
+        "div_stats": div_stats,
+        "peak_months": peak_months,
+        "enc_diag": enc_diag,
+    }
+    return train, holdout, stats
+
+
+def run_feature_engineering(cfg: "FeatureConfig | None" = None) -> dict:
+    """Run the full Step 6 feature engineering end-to-end (fold-scoped).
+
+    Reads ``master_train.parquet`` (2023-2025) and ``master_holdout.parquet``
+    (2026) from ``cfg.interim_dir``. Every training-class aggregate is fit on
+    the 2023-2024 TRAIN FOLD only, then applied as a pure lookup to the 2025
+    validation rows and the 2026 holdout — closing the leak where aggregates
+    were previously fit on the full 2023-2025 cohort and bled 2025 into the
+    validation rows.
+
+    Writes:
         feature_train.parquet
         feature_holdout.parquet
         feature_spec.csv
         leakage_review.csv
         data_dictionary.csv
         missingness_summary.csv
-
-    Returns a dict with key intermediate tables for downstream inspection.
     """
     cfg = cfg or FeatureConfig()
     cfg.feature_dir.mkdir(parents=True, exist_ok=True)
 
+    # ----- Load full train cohort (2023-2025) + locked holdout (2026) -----
     logger.info("Loading train and holdout from %s", cfg.interim_dir)
-    train = pd.read_parquet(cfg.interim_dir / "master_train.parquet")
+    train_full = pd.read_parquet(cfg.interim_dir / "master_train.parquet")
     holdout = pd.read_parquet(cfg.interim_dir / "master_holdout.parquet")
-    logger.info("Train: %s rows | Holdout: %s rows",
+    logger.info("Train_full(2023-2025): %s rows | Holdout(2026): %s rows",
+                f"{len(train_full):,}", f"{len(holdout):,}")
+
+    # ----- Split the train cohort into the 2023-24 FIT fold and 2025 val -----
+    TRAIN_YEARS = (2023, 2024)
+    VAL_YEAR = 2025
+    assert "source_year" in train_full.columns, "source_year required for fold split"
+    assert holdout["source_year"].eq(2026).all(), "holdout must be 2026 only"
+
+    tr_raw = train_full[train_full["source_year"].isin(TRAIN_YEARS)].copy()
+    va_raw = train_full[train_full["source_year"] == VAL_YEAR].copy()
+    logger.info("Fold split: train(2023-24)=%s | val(2025)=%s",
+                f"{len(tr_raw):,}", f"{len(va_raw):,}")
+
+    # ----- Pass 1: fit aggregates on 2023-24, transform train + val -----
+    # (the rows the model trains on, and the honest validation set)
+    logger.info("Pass 1: fitting aggregates on 2023-24 fold -> transform train + val")
+    tr_enc, va_enc, stats = _engineer_all(tr_raw.copy(), va_raw.copy(), cfg)
+
+    # ----- Pass 2: fit aggregates on 2023-24 again, transform 2026 holdout -----
+    # (same fit cohort -> identical aggregates; throwaway train copy discarded)
+    logger.info("Pass 2: fitting aggregates on 2023-24 fold -> transform 2026 holdout")
+    _, holdout, _ = _engineer_all(tr_raw.copy(), holdout.copy(), cfg)
+
+    # ----- Reassemble full training frame so modeling.load_split() can split
+    #       by source_year exactly as before — now fold-correct. -----
+    train = pd.concat([tr_enc, va_enc], ignore_index=True)
+    logger.info("Fold-scoped features: train_total=%s (2023-24 + 2025) | holdout=%s",
                 f"{len(train):,}", f"{len(holdout):,}")
 
-    # ----- 6A: weekend close fix -----
-    logger.info("6A: Fix date-derived features")
-    train = fix_date_features(train)
-    holdout = fix_date_features(holdout)
-
-    # ----- 6B: geography -----
-    logger.info("6B: Geography features")
-    train, holdout, tier_stats = add_geography_features(train, holdout)
-
-    # ----- 6C: channel -----
-    logger.info("6C: Channel features")
-    train, holdout, channel_stats = add_channel_features(train, holdout)
-
-    # ----- 6D: engineer -----
-    logger.info("6D: Engineer features")
-    train, holdout, eng_q_thresholds = add_engineer_features(train, holdout)
+    # ----- Stats logging (from the 2023-24 fit, i.e. the cohort the model uses) -----
+    eng_q_thresholds = stats["eng_q_thresholds"]
     logger.info(
-        "  Engineer quartile thresholds: Q1≤%.1fd, Q2≤%.1fd, Q3≤%.1fd",
+        "  Engineer quartile thresholds: Q1<=%.1fd, Q2<=%.1fd, Q3<=%.1fd",
         eng_q_thresholds["q1"], eng_q_thresholds["q2"], eng_q_thresholds["q3"],
     )
-
-    # ----- 6E: parts -----
-    logger.info("6E: Parts features")
-    train, holdout, seg_delivery = add_parts_features(train, holdout)
-    logger.info("  Segment delivery records: %d segments", len(seg_delivery))
-
-    # ----- 6F: product -----
-    logger.info("6F: Product features")
-    train, holdout, div_stats = add_product_features(train, holdout)
-
-    # ----- 6G: seasonality -----
-    logger.info("6G: Seasonality features")
-    train, holdout, peak_months = add_seasonality_features(train, holdout)
-    logger.info("  Peak months: %s", sorted(peak_months))
-
-    # ----- 6H: target encoding -----
-    logger.info("6H: Target encoding (city, state) with k=%d smoothing", cfg.smoothing_k)
-    train, holdout, enc_diag = add_target_encoded_features(train, holdout, cfg)
+    logger.info("  Segment delivery records: %d segments", len(stats["seg_delivery"]))
+    logger.info("  Peak months: %s", sorted(stats["peak_months"]))
     logger.info("  Cities: %s | States: %s | global mean: %.3f",
-                f"{enc_diag['n_cities']:,}", enc_diag["n_states"],
-                enc_diag["global_mean"])
-
-    # ----- 6I: interactions -----
-    logger.info("6I: Interaction features")
-    train, holdout = add_interaction_features(train, holdout)
+                f"{stats['enc_diag']['n_cities']:,}", stats["enc_diag"]["n_states"],
+                stats["enc_diag"]["global_mean"])
 
     # ----- 6J: feature spec -----
     logger.info("6J: Final feature spec")
     missing_feats = [f for f in MODEL_FEATURES if f not in train.columns]
     if missing_feats:
-        logger.warning("⚠ Missing features: %s", missing_feats)
+        logger.warning("Missing features: %s", missing_feats)
     else:
-        logger.info("  All %d model features present ✓", len(MODEL_FEATURES))
+        logger.info("  All %d model features present", len(MODEL_FEATURES))
 
     # ----- 6K: missingness summary -----
     logger.info("6K: Missingness summary")
@@ -1097,17 +1189,18 @@ def run_feature_engineering(cfg: FeatureConfig | None = None) -> dict:
                 train_fe.shape, holdout_fe.shape)
 
     # ----- 6O: summary -----
-    logger.info("=== Step 6 complete — %d model features ===", len(MODEL_FEATURES))
+    logger.info("=== Step 6 complete (fold-scoped) — %d model features ===",
+                len(MODEL_FEATURES))
 
     return {
         "train_fe": train_fe,
         "holdout_fe": holdout_fe,
         "model_features": MODEL_FEATURES,
-        "tier_stats": tier_stats,
-        "channel_stats": channel_stats,
-        "div_stats": div_stats,
-        "seg_delivery": seg_delivery,
-        "peak_months": peak_months,
+        "tier_stats": stats["tier_stats"],
+        "channel_stats": stats["channel_stats"],
+        "div_stats": stats["div_stats"],
+        "seg_delivery": stats["seg_delivery"],
+        "peak_months": stats["peak_months"],
         "engineer_quartile_thresholds": eng_q_thresholds,
         "feature_spec": feature_spec_tbl,
         "leakage_review": leakage_review,
@@ -1115,6 +1208,54 @@ def run_feature_engineering(cfg: FeatureConfig | None = None) -> dict:
         "missingness": missingness,
     }
 
+
+def run_feature_engineering_final(cfg: "FeatureConfig | None" = None) -> dict:
+    """Build the Phase-2 'final' feature tables (aggregates fit on 2023-2025).
+
+    Writes:
+        feature_train_final.parquet    — all 2023-2025 rows, 2023-2025-fit
+        feature_holdout_final.parquet  — 2026 holdout, 2023-2025-fit
+
+    These feed modeling.run_final_holdout(), which retrains the locked
+    models on the full 2023-2025 frame and scores 2026 once.
+    """
+    cfg = cfg or FeatureConfig()
+    cfg.feature_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("=== PHASE 2: FINAL feature build (fit on all 2023-2025) ===")
+    train_full = pd.read_parquet(cfg.interim_dir / "master_train.parquet")  # 2023-2025
+    holdout = pd.read_parquet(cfg.interim_dir / "master_holdout.parquet")  # 2026
+    assert holdout["source_year"].eq(2026).all(), "holdout must be 2026 only"
+    logger.info("Train_full(2023-2025): %s | Holdout(2026): %s",
+                f"{len(train_full):,}", f"{len(holdout):,}")
+
+    # ---- ONE pass: fit every aggregate on the FULL 2023-2025 train,
+    #      transform train_full + 2026 holdout. 2026 is strictly after the
+    #      fit window, so this is leak-free. ----
+    train_final, holdout_final, stats = _engineer_all(
+        train_full.copy(), holdout.copy(), cfg,
+    )
+
+    eng_q = stats["eng_q_thresholds"]
+    logger.info("  Engineer quartiles (2023-2025 fit): Q1<=%.1f Q2<=%.1f Q3<=%.1f",
+                eng_q["q1"], eng_q["q2"], eng_q["q3"])
+    logger.info("  Cities: %s | States: %s | global mean: %.3f",
+                f"{stats['enc_diag']['n_cities']:,}", stats["enc_diag"]["n_states"],
+                stats["enc_diag"]["global_mean"])
+
+    # ---- save (mirror run_feature_engineering's 6N writer) ----
+    save_cols = build_save_columns(train_final)
+    train_fe = sanitize_for_parquet(train_final[save_cols])
+    holdout_fe = sanitize_for_parquet(
+        holdout_final[[c for c in save_cols if c in holdout_final.columns]]
+    )
+    train_fe.to_parquet(cfg.feature_dir / "feature_train_final.parquet", index=False)
+    holdout_fe.to_parquet(cfg.feature_dir / "feature_holdout_final.parquet", index=False)
+    logger.info("  Train FINAL: %s | Holdout FINAL: %s",
+                train_fe.shape, holdout_fe.shape)
+    logger.info("=== Phase 2 feature build complete ===")
+
+    return {"train_final": train_fe, "holdout_final": holdout_fe, "stats": stats}
 
 def _configure_logging() -> None:
     """Configure root logging for CLI execution."""
@@ -1130,3 +1271,8 @@ if __name__ == "__main__":
     results = run_feature_engineering()
     logger.info("Feature engineering complete. %d model features.",
                 len(results["model_features"]))
+
+    final_results = run_feature_engineering_final()
+    logger.info("Phase 2 final feature build complete. Train %s | Holdout %s",
+                final_results["train_final"].shape,
+                final_results["holdout_final"].shape)
