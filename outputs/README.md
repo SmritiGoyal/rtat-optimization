@@ -77,14 +77,16 @@ Produced by `feature_engineering.py` (Step 6). The model-ready feature matrices 
 
 | File | Description |
 |---|---|
-| `feature_train.parquet` | Train + val rows with all 41 model features + targets + meta (~1.57M rows, 53 cols) |
-| `feature_holdout.parquet` | Holdout rows with same columns (70,250 rows, 53 cols) |
+| `feature_train.parquet` | Train + val rows with all MODEL_FEATURES columns + targets + meta (~1.57M rows) |
+| `feature_holdout.parquet` | Holdout rows with same columns (70,250 rows) |
+| `feature_train_final.parquet` | 2023-2025 rows, aggregates fit on all 2023-2025 (Phase-2 final refit) |
+| `feature_holdout_final.parquet` | 2026 holdout, aggregates fit on all 2023-2025 |
 | `feature_spec.csv` | One row per feature: group, in_train, pct_missing, dtype, in_model |
 | `data_dictionary.csv` | Full data dictionary: source, type, model_use, deployment_safe, description |
 | `leakage_review.csv` | Per-feature: risk class (LOW/MEDIUM/HIGH) + rationale |
 | `missingness_summary.csv` | Per-feature: group, pct_missing, dtype, unique count |
 
-The pipeline produces **41 model features** organized into 8 groups:
+`MODEL_FEATURES` contains 41 entries across 8 groups — **40 numeric features** that feed the trained models, plus one categorical column (`parts_shipping_tier`) that is documented and leakage-audited but held out of the numeric model:
 
 | Group | Count | Group | Count |
 |---|---|---|---|
@@ -92,7 +94,9 @@ The pipeline produces **41 model features** organized into 8 groups:
 | Channel | 3 | Parts logistics | 11 |
 | Time | 6 | Interactions | 3 |
 | Product | 4 | **Total** | **41** |
-| Engineer | 3 | | |
+| Engineer | 3 | | (40 numeric + 1 categorical) |
+
+(`parts_order_to_arrival_days_safe` is in the feature parquet for EDA/audit reference but excluded from MODEL_FEATURES entirely.)
 
 ---
 
@@ -110,19 +114,19 @@ Produced by `modeling.py` (Step 7) and updated by `leakage_audit.py` (Step 9).
 | `threshold_results_xgb.csv` | XGBoost per-threshold AUC/F1 |
 | `threshold_sensitivity.csv` | Operating-point sweep: P/R/F1 at decision thresholds 0.10-0.90 |
 | `feature_importance.csv` | Side-by-side LightGBM vs XGBoost importance with rank difference |
-| `lasso_features.csv` | Lasso coefficients per CORE feature (2 zeroed at α=0.01) |
+| `lasso_features.csv` | Lasso coefficients per CORE feature (4 zeroed of 31 at α=0.01) |
 | `segment_performance.csv` | Per Market_Category: AUC of LightGBM and XGBoost |
 | `channel_performance.csv` | Per Channel: AUC of LightGBM and XGBoost |
-| `leakage_audit.csv` | Per-feature verdicts from the 5-test audit |
+| `leakage_audit.csv` | Per-feature verdicts from the 5-test audit (41 audited, 33 CLEAN) |
 
 ### Model artifacts (joblib pickles)
 
 | File | Description |
 |---|---|
-| `lgbm_ontime3.pkl` | LightGBM classifier for OnTime_3 (with is_unbalance=True at 27.9% pos) |
+| `lgbm_ontime3.pkl` | LightGBM classifier for OnTime_3 (27.9% positive) |
 | `lgbm_ontime5.pkl` | **Primary classifier** for OnTime_5 (46.8% positive rate, balanced) |
 | `lgbm_ontime7.pkl` | LightGBM classifier for OnTime_7 |
-| `lgbm_ontime10.pkl` | LightGBM classifier for OnTime_10 (with is_unbalance=True at 75.4% pos) |
+| `lgbm_ontime10.pkl` | LightGBM classifier for OnTime_10 (75.4% positive) |
 | `lgbm_regression.pkl` | LightGBM regressor on `target_days` (used for `pred_rtat`) |
 | `xgb_ontime5.pkl` | XGBoost reference classifier (kept for comparison) |
 | `xgb_regression.pkl` | XGBoost reference regressor |
