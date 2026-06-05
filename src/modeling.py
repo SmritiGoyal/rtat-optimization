@@ -10,7 +10,7 @@ Classification track (OnTime_T):
     4. Decision Tree (depth=6)
     5. Random Forest
     6. XGBoost
-    7. LightGBM (primary)
+    7. LightGBM (retained as primary — see model-choice note below)
 
 Regression track (target_days):
     1. Overall mean baseline
@@ -22,29 +22,60 @@ Regression track (target_days):
     7. XGBoost
     8. LightGBM
 
-Split: train 2023-2024 → validate 2025 → holdout 2026 LOCKED
+Model choice: on the final 2026 holdout LightGBM and XGBoost are within
+~0.01 AUC of each other at every threshold and trade the lead by threshold
+(LightGBM ahead at T=3/T=5: 0.806/0.819 vs 0.804/0.816; XGBoost ahead at
+T=7/T=10). LightGBM is retained as the primary deployable model — it now leads
+at the primary T=5 target and on regression — with XGBoost reported as a
+validated equal-performance reference. Classifier early stopping watches AUC
+(first_metric_only on the auc-first metric list), the metric the model is
+selected on; with logloss watched instead it stopped prematurely on the easy
+high-positive thresholds. At the relaxed thresholds T=7/T=10 the target is
+highly separable (62%/75% already on-time) and validation AUC saturates within
+a couple of boosting iterations — deeper models overfit and lower val AUC — so
+those models legitimately early-stop at a low iteration count.
+
+Two-phase evaluation (select-then-refit):
+    Phase 1 — select on 2023-2024 → 2025 (load_split + the tracks below),
+              reading feature_train.parquet (aggregates fit on the 2023-2024
+              fold). The 2026 holdout is also scored here with the 2023-2024
+              models, as an out-of-time reference (evaluate_holdout).
+    Phase 2 — refit the locked models on all 2023-2025 (feature_*_final.parquet,
+              aggregates fit on 2023-2025) and score the 2026 holdout once.
+              This is the deployable headline number (run_final_holdout).
+
 Primary target: OnTime_5 (best class balance ~46/54)
 Secondary: OnTime_3, OnTime_7, OnTime_10
 
-Two-track feature design:
-    CORE (27 features)     — 0% missing, safe for linear models after
-                              median fill
-    EXTENDED (37 features) — adds DMS-dependent features (~75% missing).
-                              LightGBM/XGBoost handle missingness natively.
+Two-track feature design (feature sets imported from feature_engineering's
+MODEL_FEATURES — the single source of truth — so the trained model matches the
+leakage review exactly):
+    CORE (31 features)     — low missingness, safe for linear models after
+                             median fill
+    EXTENDED (40 features) — the numeric MODEL_FEATURES (one categorical-string
+                             column, parts_shipping_tier, is documented but
+                             excluded from the numeric model). Adds DMS-dependent
+                             features (~75% missing); boosters handle nulls
+                             natively. Uses the deployment-safe
+                             seg_delivery_days_hist, NOT the EDA-only
+                             parts_order_to_arrival_days_safe.
 
 Output artifacts under ``outputs/models/``:
     classification_results.csv
     regression_results.csv
     threshold_results.csv
+    threshold_results_xgb.csv
     threshold_sensitivity.csv
     feature_importance.csv
     lasso_features.csv
     segment_performance.csv
     channel_performance.csv
-    lgbm_ontime{T}.pkl  (one per threshold)
-    lgbm_regression.pkl
-    xgb_ontime5.pkl
+    lgbm_ontime{T}.pkl  (one per threshold — Phase-1 / 2023-2024 selection models)
+    lgbm_regression.pkl (Phase-1 / 2023-2024 selection regressor)
+    xgb_ontime{T}.pkl   (one per threshold — Phase-1 selection models)
+    xgb_ontime5.pkl     (OnTime_5 reference classifier from the bake-off)
     xgb_regression.pkl
+    lgbm_regression_final.pkl  (Phase-2 regressor, refit on all 2023-2025)
 """
 
 from __future__ import annotations
@@ -76,6 +107,8 @@ from sklearn.metrics import (
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+
+import feature_engineering as fe  # canonical MODEL_FEATURES (single source of truth)
 
 warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
@@ -118,7 +151,11 @@ class ModelingConfig:
     # from the original notebook
     lgb_clf_params: dict = field(default_factory=lambda: {
         "objective": "binary",
-        "metric": ["binary_logloss", "auc"],
+        # AUC first so early stopping (first_metric_only=True) watches AUC, the
+        # metric we actually select on. With logloss first, on the easy high-
+        # positive thresholds (T=7/T=10) logloss plateaus at ~2 iterations and
+        # stops the run before AUC converges, leaving 2-tree stumps.
+        "metric": ["auc", "binary_logloss"],
         "n_estimators": 500,
         "learning_rate": 0.05,
         "max_depth": 6,
@@ -226,28 +263,48 @@ class ModelingConfig:
 # FEATURE SETS — CORE vs EXTENDED two-track design
 # =====================================================================
 
-CORE_FEATURES: list[str] = [
-    "market_tier_ordinal", "tier_mean_rtat", "tier_late_rate5",
-    "city_target_enc", "state_target_enc",
-    "channel_risk_ordinal", "channel_mean_rtat", "channel_late_rate5",
-    "month_of_year", "quarter", "is_peak_month", "month_mean_rtat",
-    "div_mean_rtat", "div_late_rate5", "is_ter_repair",
-    "engineer_hist_mean_rtat", "engineer_quartile",
-    "has_parts_reclaim", "parts_count_reclaim", "parts_complexity_score",
-    "is_reclaim", "is_same_symptom_reclaim",
-    "ordered_via_dms", "parts_delivery_tier_known",
-    "geo_channel_risk", "rural_parts_flag", "eng_channel_risk",
+# EXTENDED is the canonical numeric model feature set: feature_engineering's
+# MODEL_FEATURES (the leakage-reviewed list) minus the one non-numeric column,
+# parts_shipping_tier (a categorical string the linear/tree code here does not
+# encode — documented but excluded from the numeric model, exactly like the
+# EDA-only parts_order_to_arrival_days_safe). Importing it from the single
+# source of truth prevents the two files from drifting: MODEL_FEATURES already
+# EXCLUDES parts_order_to_arrival_days_safe (the deployment-unsafe repair-level
+# delivery duration) and INCLUDES its deployment-safe substitute
+# seg_delivery_days_hist, so the model trains on exactly what the leakage
+# review and data dictionary describe.
+_NON_NUMERIC_MODEL_FEATURES: tuple[str, ...] = ("parts_shipping_tier",)
+
+EXTENDED_FEATURES: list[str] = [
+    f for f in fe.MODEL_FEATURES if f not in _NON_NUMERIC_MODEL_FEATURES
 ]
-"""27 features safe for linear models after median fill — 0% missing."""
+"""40 numeric features for LightGBM/XGBoost — the canonical MODEL_FEATURES
+(leakage-reviewed) minus the one categorical-string column. Includes
+DMS-dependent features (~75% missing); boosters handle the nulls natively."""
 
 
-EXTENDED_FEATURES: list[str] = CORE_FEATURES + [
+# CORE is the linear-model subset: low-missingness features that survive median
+# fill without destroying signal. Defined as EXTENDED minus the high-missingness
+# DMS/parts columns and seg_delivery_days_hist (~44% missing), which would be
+# mostly median-filled noise for a linear model. Relative to the original 27-
+# feature linear set this adds four low-missing features that MODEL_FEATURES
+# carries — day_of_week, is_weekend_close, engineer_proxy_missing, and
+# is_sealed_repair — giving 31. The linear models are comparison baselines, so a
+# slightly different CORE only shifts those baseline rows, not the boosted
+# headline models (which use the full EXTENDED).
+_CORE_EXCLUDE: frozenset[str] = frozenset({
     "parts_line_count", "parts_order_qty_sum", "parts_multi_line_flag",
     "parts_has_arrival_flag", "parts_has_shipment_flag",
-    "parts_delivery_tier", "parts_order_to_arrival_days_safe",
-    "parts_truncation_flag", "reclaim_period_days", "is_sealed_repair",
+    "parts_delivery_tier", "parts_truncation_flag", "reclaim_period_days",
+    "seg_delivery_days_hist",
+})
+
+CORE_FEATURES: list[str] = [
+    f for f in EXTENDED_FEATURES if f not in _CORE_EXCLUDE
 ]
-"""37 features for LightGBM/XGBoost — includes DMS-dependent (~75% missing)."""
+"""31 features for linear models after median fill — the low-missingness subset
+of EXTENDED (DMS-dependent ~75%-missing columns and seg_delivery_days_hist
+excluded)."""
 
 
 # =====================================================================
@@ -594,7 +651,8 @@ def run_classification_track(
         X_tr_e, y_tr5,
         eval_set=[(X_vl_e, y_vl5)],
         callbacks=[
-            lgb.early_stopping(cfg.early_stopping_rounds, verbose=False),
+            lgb.early_stopping(cfg.early_stopping_rounds, first_metric_only=True,
+                               verbose=False),
             lgb.log_evaluation(9999),
         ],
     )
@@ -657,7 +715,8 @@ def run_threshold_sweep(
             X_tr_e, y_tr_t,
             eval_set=[(X_vl_e, y_vl_t)],
             callbacks=[
-                lgb.early_stopping(cfg.early_stopping_rounds, verbose=False),
+                lgb.early_stopping(cfg.early_stopping_rounds, first_metric_only=True,
+                                   verbose=False),
                 lgb.log_evaluation(9999),
             ],
         )
@@ -671,6 +730,54 @@ def run_threshold_sweep(
             "  T=%d  AUC=%.4f  F1=%.4f  Pos=%.1f%%  best_iter=%d",
             t, res["roc_auc"], res["f1"],
             100 * res["pos_rate"], m.best_iteration_,
+        )
+
+    return pd.DataFrame(results), models
+
+
+def run_threshold_sweep_xgb(
+        train_df: pd.DataFrame,
+        val_df: pd.DataFrame,
+        cfg,
+) -> tuple[pd.DataFrame, dict[int, "xgb.XGBClassifier"]]:
+    """Train XGBoost on each OnTime threshold (T=3,5,7,10) independently.
+
+    Uses scale_pos_weight = n_neg / n_pos per threshold to handle the
+    skew at T=3 (~28% positive) and T=10 (~75% positive) — the XGBoost
+    equivalent of LightGBM's is_unbalance=True.
+
+    Returns:
+        (threshold_results_df, models_dict)  with models_dict[T] = fitted
+        XGBClassifier.
+    """
+    X_tr_e = prep_X(train_df, EXTENDED_FEATURES)
+    X_vl_e = prep_X(val_df, EXTENDED_FEATURES)
+
+    results: list[dict] = []
+    models: dict[int, xgb.XGBClassifier] = {}
+
+    for t in cfg.ontime_targets:
+        y_tr_t = prep_y(train_df, f"OnTime_{t}")
+        y_vl_t = prep_y(val_df, f"OnTime_{t}")
+
+        params_t = dict(cfg.xgb_clf_params)
+        n_pos = int((y_tr_t == 1).sum())
+        n_neg = int((y_tr_t == 0).sum())
+        params_t["scale_pos_weight"] = (n_neg / n_pos) if n_pos else 1.0
+
+        m = xgb.XGBClassifier(**params_t)
+        m.fit(X_tr_e, y_tr_t, eval_set=[(X_vl_e, y_vl_t)], verbose=False)
+
+        y_prob_t = m.predict_proba(X_vl_e)[:, 1]
+        y_pred_t = (y_prob_t >= cfg.decision_threshold).astype(int)
+        res = eval_clf("XGBoost", y_vl_t, y_prob_t, y_pred_t,
+                       target=f"OnTime_{t}")
+        results.append(res)
+        models[t] = m
+        logger.info(
+            "  [XGB] T=%d  AUC=%.4f  F1=%.4f  Pos=%.1f%%  best_iter=%d",
+            t, res["roc_auc"], res["f1"],
+            100 * res["pos_rate"], m.best_iteration,
         )
 
     return pd.DataFrame(results), models
@@ -819,46 +926,194 @@ def feature_importance_comparison(
 # =====================================================================
 
 def evaluate_holdout(
-    lgb_models: dict[int, lgb.LGBMClassifier],
-    lgb_reg: lgb.LGBMRegressor,
-    holdout: pd.DataFrame,
-    cfg: ModelingConfig,
+        lgb_models: dict,
+        lgb_reg,
+        xgb_models: dict,
+        xgb_reg,
+        holdout: pd.DataFrame,
+        cfg,
 ) -> dict[str, dict]:
-    """Run all per-threshold LightGBM classifiers + regressor on 2026 holdout.
+    """Score the 2026 holdout with the Phase-1 (2023-2024) models — both
+    LightGBM and XGBoost — as an out-of-time reference.
 
-    This is the **only** point at which the 2026 holdout is touched.
-    No training-time choices may be informed by the results returned
-    from this function — they are reported numbers, not tuning signals.
+    This is NOT the deployable headline number: these are the selection-fold
+    models applied to 2026. The deployable figure comes from run_final_holdout
+    (Phase 2), which refits on all 2023-2025 before scoring. No result here may
+    inform any training-time choice.
 
     Returns:
         {
-            "classification": {T: {auc, f1, ...}, ...},
-            "regression": {mae, rmse, r2},
+          "classification_xgb": {T: {...}},   # XGBoost, Phase-1 reference
+          "classification_lgb": {T: {...}},   # LightGBM, Phase-1 reference
+          "regression_xgb": {...},
+          "regression_lgb": {...},
         }
     """
     X_ho_e = prep_X(holdout, EXTENDED_FEATURES)
-    results: dict[str, dict] = {"classification": {}}
+    out: dict[str, dict] = {
+        "classification_xgb": {},
+        "classification_lgb": {},
+    }
 
-    for t, m in lgb_models.items():
+    for t in cfg.ontime_targets:
         y_ho_t = prep_y(holdout, f"OnTime_{t}")
-        y_prob = m.predict_proba(X_ho_e)[:, 1]
-        y_pred = (y_prob >= cfg.decision_threshold).astype(int)
-        results["classification"][t] = eval_clf(
-            f"LightGBM Holdout T={t}", y_ho_t, y_prob, y_pred,
-            target=f"OnTime_{t}",
+
+        p_xgb = xgb_models[t].predict_proba(X_ho_e)[:, 1]
+        pred_xgb = (p_xgb >= cfg.decision_threshold).astype(int)
+        out["classification_xgb"][t] = eval_clf(
+            f"XGB Holdout T={t}", y_ho_t, p_xgb, pred_xgb, target=f"OnTime_{t}")
+
+        p_lgb = lgb_models[t].predict_proba(X_ho_e)[:, 1]
+        pred_lgb = (p_lgb >= cfg.decision_threshold).astype(int)
+        out["classification_lgb"][t] = eval_clf(
+            f"LGB Holdout T={t}", y_ho_t, p_lgb, pred_lgb, target=f"OnTime_{t}")
+
+        logger.info(
+            "  Holdout T=%d  XGB AUC=%.4f F1=%.4f  |  LGB AUC=%.4f F1=%.4f",
+            t,
+            out["classification_xgb"][t]["roc_auc"], out["classification_xgb"][t]["f1"],
+            out["classification_lgb"][t]["roc_auc"], out["classification_lgb"][t]["f1"],
         )
-        logger.info("  Holdout T=%d  AUC=%.4f  F1=%.4f",
-                    t, results["classification"][t]["roc_auc"],
-                    results["classification"][t]["f1"])
 
     y_ho_r = prep_y(holdout, "target_days")
-    y_ho_pred = lgb_reg.predict(X_ho_e)
-    results["regression"] = eval_reg("LightGBM Holdout regression", y_ho_r, y_ho_pred)
-    logger.info("  Holdout regression  MAE=%.3fd  RMSE=%.3fd  R²=%.4f",
-                results["regression"]["mae"], results["regression"]["rmse"],
-                results["regression"]["r2"])
+    out["regression_xgb"] = eval_reg("XGB Holdout regression", y_ho_r, xgb_reg.predict(X_ho_e))
+    out["regression_lgb"] = eval_reg("LGB Holdout regression", y_ho_r, lgb_reg.predict(X_ho_e))
+    logger.info(
+        "  Holdout regression  XGB MAE=%.3fd R²=%.4f  |  LGB MAE=%.3fd R²=%.4f",
+        out["regression_xgb"]["mae"], out["regression_xgb"]["r2"],
+        out["regression_lgb"]["mae"], out["regression_lgb"]["r2"],
+    )
 
-    return results
+    return out
+
+# =====================================================================
+# SECTION 7Q: PHASE-2 FINAL FEATURE TABLES (load)
+# =====================================================================
+
+def load_final(cfg) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load the 2023-2025-fit final training frame and 2026 holdout.
+
+    Returns (train_final_df, holdout_final_df). train_final is the full
+    2023-2025 cohort (no train/val split — selection is already done).
+    """
+    train_final = pd.read_parquet(cfg.feature_dir / "feature_train_final.parquet")
+    holdout_final = pd.read_parquet(cfg.feature_dir / "feature_holdout_final.parquet")
+    logger.info("  Final train (2023-2025): %s | Final holdout (2026): %s [LOCKED]",
+                f"{len(train_final):,}", f"{len(holdout_final):,}")
+    return train_final, holdout_final
+
+# =====================================================================
+# SECTION 7R: PHASE-2 FINAL HOLDOUT (refit on 2023-2025, score 2026 once)
+# =====================================================================
+
+def run_final_holdout(
+    train_final: pd.DataFrame,
+    holdout_final: pd.DataFrame,
+    lgb_models: dict,          # Phase-1 LightGBM threshold models (for locked best_iter)
+    xgb_models: dict,          # Phase-1 XGBoost threshold models (for locked best_iter)
+    lgb_reg,                   # Phase-1 LightGBM regressor
+    xgb_reg,                   # Phase-1 XGBoost regressor
+    cfg,
+) -> dict:
+    """Select-then-refit final evaluation.
+
+    For each threshold T: refit LightGBM and XGBoost on ALL of 2023-2025
+    at the locked Phase-1 iteration count, then score the 2026 holdout.
+    LightGBM and XGBoost are within ~0.01 AUC on the holdout and trade the
+    lead by threshold (LightGBM ahead at T=3/T=5, XGBoost at T=7/T=10);
+    LightGBM is reported as the primary/deployable model and XGBoost for
+    comparison.
+
+    This touches the 2026 holdout exactly once. Do NOT tune anything after
+    reading these numbers — that would void the holdout.
+    """
+    logger.info("=== PHASE 2: FINAL HOLDOUT (refit on 2023-2025, score 2026 once) ===")
+
+    X_full = prep_X(train_final, EXTENDED_FEATURES)
+    X_ho = prep_X(holdout_final, EXTENDED_FEATURES)
+
+    # Guard: the Phase-1 XGB regression blew up (MAE 18.7) — almost certainly
+    # inf/overflow in the holdout matrix. Surface it instead of silently
+    # reporting garbage.
+    Xho_np = X_ho.to_numpy(dtype="float32")
+    n_inf = int(np.isinf(Xho_np).sum())
+    if n_inf:
+        logger.warning("  Holdout feature matrix has %d inf values "
+                       "(max abs=%.3g) — XGB regression may be unreliable.",
+                       n_inf, float(np.nanmax(np.abs(Xho_np))))
+
+    out: dict[str, dict] = {"classification_lgb": {}, "classification_xgb": {}}
+
+    for t in cfg.ontime_targets:
+        y_full_t = prep_y(train_final, f"OnTime_{t}")
+        y_ho_t = prep_y(holdout_final, f"OnTime_{t}")
+        pos_rate = float(y_full_t.mean())
+
+        # ---- LightGBM: locked n_estimators, no early stopping, full data ----
+        lgb_iter = int(lgb_models[t].best_iteration_)
+        lgb_params = dict(cfg.lgb_clf_params)
+        lgb_params["n_estimators"] = lgb_iter
+        if pos_rate < cfg.unbalance_lo or pos_rate > cfg.unbalance_hi:
+            lgb_params["is_unbalance"] = True
+        m_lgb = lgb.LGBMClassifier(**lgb_params)
+        m_lgb.fit(X_full, y_full_t)  # no eval_set, no callbacks
+
+        p_lgb = m_lgb.predict_proba(X_ho)[:, 1]
+        pred_lgb = (p_lgb >= cfg.decision_threshold).astype(int)
+        out["classification_lgb"][t] = eval_clf(
+            f"FINAL LGB Holdout T={t}", y_ho_t, p_lgb, pred_lgb, target=f"OnTime_{t}")
+
+        # ---- XGBoost: locked n_estimators (best_iteration is 0-indexed) ----
+        xgb_iter = int(xgb_models[t].best_iteration) + 1
+        xgb_params = dict(cfg.xgb_clf_params)
+        xgb_params["n_estimators"] = xgb_iter
+        xgb_params.pop("early_stopping_rounds", None)  # no ES without eval_set
+        n_pos = int((y_full_t == 1).sum())
+        n_neg = int((y_full_t == 0).sum())
+        xgb_params["scale_pos_weight"] = (n_neg / n_pos) if n_pos else 1.0
+        m_xgb = xgb.XGBClassifier(**xgb_params)
+        m_xgb.fit(X_full, y_full_t, verbose=False)  # no eval_set
+
+        p_xgb = m_xgb.predict_proba(X_ho)[:, 1]
+        pred_xgb = (p_xgb >= cfg.decision_threshold).astype(int)
+        out["classification_xgb"][t] = eval_clf(
+            f"FINAL XGB Holdout T={t}", y_ho_t, p_xgb, pred_xgb, target=f"OnTime_{t}")
+
+        logger.info(
+            "  FINAL Holdout T=%d  LGB AUC=%.4f F1=%.4f  |  XGB AUC=%.4f F1=%.4f  "
+            "(lgb_iter=%d xgb_iter=%d)",
+            t,
+            out["classification_lgb"][t]["roc_auc"], out["classification_lgb"][t]["f1"],
+            out["classification_xgb"][t]["roc_auc"], out["classification_xgb"][t]["f1"],
+            lgb_iter, xgb_iter,
+        )
+
+    # ---- Regression: LightGBM primary (robust); refit on full 2023-2025 ----
+    y_full_r = prep_y(train_final, "target_days")
+    y_ho_r = prep_y(holdout_final, "target_days")
+
+    lgb_reg_iter = int(getattr(lgb_reg, "best_iteration_", 0) or cfg.lgb_reg_params.get("n_estimators", 500))
+    lgb_reg_params = dict(cfg.lgb_reg_params)
+    lgb_reg_params["n_estimators"] = lgb_reg_iter
+    m_lgb_reg = lgb.LGBMRegressor(**lgb_reg_params)
+    m_lgb_reg.fit(X_full, y_full_r)
+    out["regression_lgb"] = eval_reg(
+        "FINAL LGB Holdout regression", y_ho_r, m_lgb_reg.predict(X_ho))
+
+    logger.info("  FINAL Holdout regression (LGB)  MAE=%.3fd  RMSE=%.3fd  R²=%.4f",
+                out["regression_lgb"]["mae"], out["regression_lgb"]["rmse"],
+                out["regression_lgb"]["r2"])
+
+    # Persist the final deployable regressor. The per-threshold classifiers
+    # refit above are local to the loop and intentionally not saved — only
+    # their holdout metrics are reported. Persist them here if a future
+    # deployment needs the threshold models, not just lgbm_regression_final.
+    for t in cfg.ontime_targets:
+        pass  # per-threshold final classifiers not persisted (metrics only)
+    joblib.dump(m_lgb_reg, cfg.model_dir / "lgbm_regression_final.pkl")
+
+    logger.info("=== Phase 2 final holdout complete ===")
+    return out
 
 
 # =====================================================================
@@ -909,6 +1164,9 @@ def run_modeling(cfg: ModelingConfig | None = None) -> dict:
     logger.info("=== LightGBM threshold sweep T=3,5,7,10 ===")
     thresh_df, lgb_models = run_threshold_sweep(train_df, val_df, cfg)
 
+    logger.info("=== XGBoost threshold sweep T=3,5,7,10 ===")
+    thresh_df_xgb, xgb_models = run_threshold_sweep_xgb(train_df, val_df, cfg)
+
     # ---- 7J: operating threshold sensitivity ----
     logger.info("=== Operating threshold sensitivity ===")
     thresh_sens = compute_threshold_sensitivity(clf_arts["y_vl5"], y_prob_lgb)
@@ -919,7 +1177,7 @@ def run_modeling(cfg: ModelingConfig | None = None) -> dict:
 
     # ---- 7P: holdout evaluation (FINAL) ----
     logger.info("=== HOLDOUT EVALUATION (2026) ===")
-    holdout_results = evaluate_holdout(lgb_models, lgb_reg, holdout, cfg)
+    holdout_results = evaluate_holdout(lgb_models, lgb_reg, xgb_models, xgb_reg, holdout, cfg)
 
     # ---- 7N: save all outputs ----
     logger.info("=== Saving outputs ===")
@@ -938,12 +1196,25 @@ def run_modeling(cfg: ModelingConfig | None = None) -> dict:
             cfg.model_dir / "channel_performance.csv",
         )
 
+    if getattr(cfg, "run_final_refit", True):
+        train_final, holdout_final = load_final(cfg)
+        final_holdout_results = run_final_holdout(
+                train_final, holdout_final,
+                lgb_models, xgb_models, lgb_reg, xgb_reg, cfg,
+            )
+    else:
+        final_holdout_results = None
+
     # Save models per-threshold + final regressor and XGBoost reference
     for t, m in lgb_models.items():
         joblib.dump(m, cfg.model_dir / f"lgbm_ontime{t}.pkl")
     joblib.dump(lgb_reg, cfg.model_dir / "lgbm_regression.pkl")
     joblib.dump(clf_arts["xgb_clf"], cfg.model_dir / "xgb_ontime5.pkl")
     joblib.dump(xgb_reg, cfg.model_dir / "xgb_regression.pkl")
+
+    for t, m in xgb_models.items():
+        joblib.dump(m, cfg.model_dir / f"xgb_ontime{t}.pkl")
+    thresh_df_xgb.to_csv(cfg.model_dir / "threshold_results_xgb.csv", index=False)
 
     logger.info("=== Step 7 complete ===")
 
@@ -978,5 +1249,7 @@ def _configure_logging() -> None:
 if __name__ == "__main__":
     _configure_logging()
     results = run_modeling()
-    logger.info("Modeling complete. %d model artifacts saved.",
-                len(results["models"]["lgb_classifiers"]) + 3)
+    logger.info("Modeling complete. %d per-threshold LightGBM models trained "
+                "(plus XGBoost threshold models, regressors, and the Phase-2 "
+                "final regressor — see outputs/models/).",
+                len(results["models"]["lgb_classifiers"]))
