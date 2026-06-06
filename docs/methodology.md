@@ -122,7 +122,7 @@ The model uses **40 numeric features** (plus one categorical feature documented 
 
 The 40 numeric features split into two model-specific subsets:
 
-- **CORE (31 features)**: low missingness across the training cohort. Safe for linear models after median fill. Excludes DMS-dependent features (parts line count, order quantity, multi-line flag, etc.) because they're ~75% null (only ~28% of repairs route parts through DMS), plus the ~44%-null `seg_delivery_days_hist`.
+- **CORE (31 features)**: low missingness across the training cohort. Safe for linear models after median fill. Excludes DMS-dependent features (parts line count, order quantity, multi-line flag, etc.) because they're ~75% null (only ~25% of repairs route parts through DMS), plus the ~44%-null `seg_delivery_days_hist`.
 - **EXTENDED (40 features = the numeric MODEL_FEATURES)**: adds DMS-dependent features. Used by tree models (Random Forest, XGBoost, LightGBM) that handle missing values natively. Uses the deployment-safe `seg_delivery_days_hist` and excludes both `parts_order_to_arrival_days_safe` (EDA reference only) and the one categorical-string column `parts_shipping_tier` (documented but held out of the numeric model).
 
 This isn't a stylistic choice. Linear models on the EXTENDED set produce worse holdout performance because median fill on 75%-null features destroys signal; tree models on the CORE set leave money on the table. The design is informed by validation metrics, not aesthetic preference.
