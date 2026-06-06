@@ -260,7 +260,7 @@ Repeat-visit features. `reclaim_period_days` is the days since the prior visit; 
 
 ## 7. DMS features
 
-11 features, all dependent on DMS being the parts dispatch channel. ~75% of repairs have DMS feature nulls because DMS routes only ~28% of all repairs. Tree models handle these nulls natively; linear models can't (which is why CORE excludes them).
+11 features, all dependent on DMS being the parts dispatch channel. ~75% of repairs have DMS feature nulls because DMS routes only ~25% of all repairs. Tree models handle these nulls natively; linear models can't (which is why CORE excludes them).
 
 ### Process / structural
 
