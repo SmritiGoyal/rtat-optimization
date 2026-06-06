@@ -170,7 +170,7 @@ Four binary flags derived from upstream columns:
 
 | Feature | Source | Direction |
 |---|---|---|
-| `is_ter_repair` | `svc_ter_repair` | 1 if TER (expedited) repair. **Counterintuitively faster**: 5.5d avg vs cohort 6.8d. Initially proposed as a "complexity" feature, EDA reversed the direction — TER routing actually expedites repairs. |
+| `is_ter_repair` | `svc_ter_repair` | 1 if TER (expedited) repair. **Counterintuitively faster**: 5.5d avg vs 9.7d for non-TER repairs. Initially proposed as a "complexity" feature, EDA reversed the direction — TER routing actually expedites repairs. |
 | `is_sealed_repair` | `svc_sealed_repair` | 1 if sealed-system repair. ~26% of cohort, 7.5d avg (moderate). |
 | `is_reclaim` | `is_reclaim_case` | 1 if a repeat visit. ~8% of cohort. |
 | `is_same_symptom_reclaim` | Composite | 1 if both `is_reclaim == 1` AND `same_symptom_reclaim == 1`. ~59% of reclaim cases — the worst subset of repeat failures. |
