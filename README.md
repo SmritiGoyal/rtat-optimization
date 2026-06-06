@@ -60,7 +60,7 @@ Every feature gets one of five labels: INTAKE, TRAINING, POST_INTAKE, MEDIUM, PO
 
 ### 3. Two-track CORE / EXTENDED feature design, not one-size-fits-all
 
-The 40 numeric features split into two model-specific subsets. CORE (31 features) is low-missingness and safe for linear models after median fill. EXTENDED (the full 40) adds DMS-dependent features for tree models that handle nulls natively — those features have ~75% missingness because only ~28% of repairs route parts through DMS. This isn't a stylistic choice: linear models on EXTENDED produce worse holdout performance because median fill on 75%-null features destroys signal; tree models on CORE leave money on the table. The split is informed by both validation metrics and operational deployability.
+The 40 numeric features split into two model-specific subsets. CORE (31 features) is low-missingness and safe for linear models after median fill. EXTENDED (the full 40) adds DMS-dependent features for tree models that handle nulls natively — those features have ~75% missingness because only ~25% of repairs route parts through DMS. This isn't a stylistic choice: linear models on EXTENDED produce worse holdout performance because median fill on 75%-null features destroys signal; tree models on CORE leave money on the table. The split is informed by both validation metrics and operational deployability.
 
 ### 4. Five-test automated leakage audit, not human review
 
@@ -256,7 +256,7 @@ Predicted lateness drives a 10.4-point promoter gap and 7.7-point detractor gap 
 
 The 40 numeric features split into two model-specific subsets:
 
-- **CORE (31 features)**: low missingness, safe for linear models after median fill. Excludes DMS-dependent features (parts line count, order quantity, multi-line flag, etc.) which have ~75% missingness because only ~28% of repairs route parts through DMS, plus the ~44%-missing `seg_delivery_days_hist`.
+- **CORE (31 features)**: low missingness, safe for linear models after median fill. Excludes DMS-dependent features (parts line count, order quantity, multi-line flag, etc.) which have ~75% missingness because only ~25% of repairs route parts through DMS, plus the ~44%-missing `seg_delivery_days_hist`.
 - **EXTENDED (40 features = the numeric MODEL_FEATURES)**: adds DMS-dependent features for tree models that handle missing values natively. Uses the deployment-safe `seg_delivery_days_hist` and excludes both `parts_order_to_arrival_days_safe` (training-EDA only) and the one categorical-string column `parts_shipping_tier` (documented but held out of the numeric model).
 
 This isn't a stylistic choice. Linear models on the EXTENDED set produce worse holdout performance because median fill on 75%-null features destroys signal; tree models on the CORE set leave money on the table. The design choice is informed by both validation metrics and operational deployability.
