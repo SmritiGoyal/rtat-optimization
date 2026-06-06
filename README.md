@@ -87,7 +87,7 @@ rtat-optimization/
 ├── src/
 │   ├── ingestion.py              Step 1-4: Excel → integrated parquet
 │   ├── eda.py                    Step 5: first-pass EDA + hypothesis list
-│   ├── feature_engineering.py    Step 6: 41 model features + leakage review
+│   ├── feature_engineering.py    Step 6: 40 numeric features (+1 categorical) + leakage review
 │   ├── modeling.py               Step 7: 15 candidate models + comparison
 │   ├── prioritization.py         Step 8: priority matrix + 4-lever decomposition
 │   ├── leakage_audit.py          Step 9: 5-test feature audit
