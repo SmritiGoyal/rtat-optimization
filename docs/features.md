@@ -91,7 +91,7 @@ The `k = 30` prior acts as 30 virtual observations of the global mean, pulling l
 
 **Timing:** TRAINING — encoding is fit on training only, applied to holdout via map lookup.
 
-**Rationale:** City has ~14,000 unique values; State has 51 (plus territories). Without smoothing, low-count cities would memorize individual training observations and overfit. Smoothing also is a standard mitigation for target-encoding leakage.
+**Rationale:** City has ~14,000 unique values; State has 56 (50 states plus DC and US territories). Without smoothing, low-count cities would memorize individual training observations and overfit. Smoothing also is a standard mitigation for target-encoding leakage.
 
 **Implementation:** Section 6H, `smooth_target_encode()` and `add_target_encoded_features()`.
 
