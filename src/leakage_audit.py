@@ -42,8 +42,10 @@ Verdict aggregation:
     CONFIRM-WITH-OPS / FLAG) and writes a CSV summary.
 
 Pass criteria for the full audit:
-    - Zero features in POST_CLOSE timing class (except known
-      conditional, like parts_delivery_tier)
+    - Zero features in POST_CLOSE timing class (the two POST_CLOSE parts
+      features, parts_delivery_tier and parts_has_arrival_flag, are excluded
+      from MODEL_FEATURES and therefore absent from the feature parquet;
+      they do not appear in audit results)
     - Zero features with |Pearson r| > 0.70
     - Zero features with KS > 0.30
     - reclaim_period_days correlation < 0.15, importance < 5%
