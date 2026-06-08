@@ -69,7 +69,7 @@ Repair-order-level data covering:
 
 ---
 
-## Slide 4 — Data Preparation: 41 Features, Temporal Split, 5-Test Leakage Audit
+## Slide 4 — Data Preparation: 39 Features, Temporal Split, 5-Test Leakage Audit
 
 **Raw data → modeling cohort**
 
@@ -97,7 +97,7 @@ Final Modeling Cohort (74.8%):            1,640,829 repairs
 
 A strict temporal split tests performance on truly unseen future data. Training-class aggregates are fit on the 2023-2024 fold for model selection, then refit on all 2023-2025 for the final model, which scores the 2026 holdout exactly once.
 
-**Feature audit summary - 41 audited features across 8 groups** (40 numeric model features + 1 categorical held out of the numeric model)
+**Feature audit summary - 39 audited features across 8 groups** (38 numeric model features + 1 categorical held out of the numeric model)
 
 | Group | # Features | Description | Audit Status |
 |---|---:|---|---|
@@ -107,10 +107,10 @@ A strict temporal split tests performance on truly unseen future data. Training-
 | Product | 4 | Division-level performance aggregates | Medium |
 | Engineer | 3 | Historical mean RTAT proxy (fold-scoped, train fold only) | Clean |
 | Reclaim | 6 | Parts flag, repair complexity, repeat-visit | Clean |
-| Parts logistics | 11 | Parts ordering, logistics, segment delivery days | Conditional |
+| Parts logistics | 9 | Parts ordering, logistics, segment delivery days | Conditional |
 | Interaction | 3 | Geo x channel x engineer cross-features | Medium |
 
-The leakage audit flags features that may not be deployment-safe. Note: the audit compares training against the 2026 holdout and does not, by construction, detect a leak confined to the validation fold — see Slide 7.
+The leakage audit flags features that may not be deployment-safe. The three post-close parts features (`parts_order_to_arrival_days_safe`, its binned twin `parts_delivery_tier`, and `parts_has_arrival_flag`) are excluded from the model entirely; the audited set of 39 returns 33 CLEAN, 3 confirm-with-ops, and 3 stability flags. Note: the audit compares training against the 2026 holdout and does not, by construction, detect a leak confined to the validation fold — see Slide 7.
 
 ---
 
@@ -124,11 +124,11 @@ The leakage audit flags features that may not be deployment-safe. Note: the audi
 | Logistic Regression (L2) | 0.770 | 0.734 | 66.5% | 71.8% | 0.690 |
 | Decision Tree (depth=3) | 0.738 | 0.657 | 60.9% | 83.7% | 0.705 |
 | Decision Tree (depth=6) | 0.772 | 0.726 | 64.9% | 76.6% | 0.703 |
-| Random Forest | 0.791 | 0.755 | 65.8% | 78.4% | 0.716 |
-| XGBoost | 0.802 | 0.767 | 68.6% | 75.0% | 0.717 |
-| LightGBM | 0.770 | 0.686 | 67.7% | 73.1% | 0.703 |
+| Random Forest | 0.785 | 0.752 | 66.0% | 75.5% | 0.705 |
+| XGBoost | 0.794 | 0.761 | 68.3% | 73.7% | 0.709 |
+| LightGBM | 0.762 | 0.678 | 67.3% | 71.3% | 0.692 |
 
-*On this single-fit validation bake-off XGBoost leads on AUC (0.802); LightGBM (0.770) trails on the single fit but pulls ahead on the final refit holdout — see Slide 7. LightGBM is the primary model: it leads at the primary T=5 target and on regression on the deployable 2026 holdout.*
+*On this single-fit validation bake-off XGBoost leads on AUC (0.794); LightGBM (0.762) trails on the single fit but pulls ahead on the final refit holdout — see Slide 7. LightGBM is the primary model: it leads at the primary T=5 target and on regression on the deployable 2026 holdout.*
 
 **Regression Model Comparison — validation (2025), MAE in days**
 
@@ -137,17 +137,19 @@ The leakage audit flags features that may not be deployment-safe. Note: the audi
 | Mean Baseline | 6.772 | 10.984 | -0.001 |
 | Segment Mean | 5.971 | 10.191 | 0.138 |
 | Ridge (L2) | 5.390 | 9.402 | 0.267 |
-| Random Forest | 4.956 | 9.148 | 0.306 |
-| XGBoost | 4.930 | 9.069 | 0.318 |
-| LightGBM | 4.967 | 9.198 | 0.298 |
+| Lasso (L1) | 5.365 | 9.390 | 0.268 |
+| Decision Tree (depth=6) | 5.126 | 9.326 | 0.278 |
+| Random Forest | 5.056 | 9.201 | 0.298 |
+| XGBoost | 5.037 | 9.131 | 0.308 |
+| LightGBM | 5.071 | 9.267 | 0.287 |
 
 **Why LightGBM**
 
-1. **Leads on the deployable holdout** — at the primary T=5 target LightGBM edges XGBoost on the 2026 holdout (0.819 vs 0.816 AUC) and leads on regression. Across thresholds the two are within ~0.01 AUC and trade the lead (XGBoost is ahead at T=7/T=10). LightGBM is also the more stable regressor and ~25% faster to train.
+1. **Leads on the deployable holdout** — at the primary T=5 target LightGBM edges XGBoost on the 2026 holdout (0.806 vs 0.803 AUC) and leads on regression. Across thresholds the two are within ~0.01 AUC and trade the lead (XGBoost is ahead at T=7). LightGBM is also the more stable regressor and ~25% faster to train.
 2. **Native missing-value handling** - 75% of parts-logistics features are structurally missing for repairs that don't need parts. LightGBM handles this natively via surrogate splits.
 3. **Scale efficiency** - trains materially faster on 1.5M rows, enabling iterative development and rapid retraining.
 
-> **32% MAE improvement over naive baseline** (6.77 -> 4.62 days on the 70,250-repair 2026 holdout, final model)
+> **30% MAE improvement over the mean baseline** (holdout 4.74 days vs the 6.77-day validation mean-baseline, final model on the 70,250-repair 2026 holdout)
 
 ---
 
@@ -155,7 +157,7 @@ The leakage audit flags features that may not be deployment-safe. Note: the audi
 
 **Top 12 Feature Importances (LightGBM)**
 
-The most important features cluster around engineer history, channel risk, and market tier rather than parts logistics — which inverts the operational assumption the field service org had been working from.
+The most important features cluster around engineer history, channel risk, and market tier rather than parts logistics — which inverts the operational assumption the field service org had been working from. With the post-close parts features removed from the model, the engineer-history signal carries even more of the model's weight.
 
 **The ~4x engineer gap — concentrated in the slowest quartile**
 
@@ -180,10 +182,10 @@ The Q4/Q1 ratio of **3.9x** is the #1 driver across all segments. The signal is 
 
 | Metric | Value |
 |---|---:|
-| Holdout AUC (2026, T=5) | **0.819** (XGBoost 0.816) |
-| Holdout F1 (T=5) | **0.740** |
-| Holdout MAE (regression) | **4.62 days** |
-| Holdout R² (regression) | **0.36** |
+| Holdout AUC (2026, T=5) | **0.806** (XGBoost 0.803) |
+| Holdout F1 (T=5) | **0.722** |
+| Holdout MAE (regression) | **4.74 days** |
+| Holdout R² (regression) | **0.34** |
 
 **Model robustness benchmarks**
 
@@ -191,9 +193,9 @@ The Q4/Q1 ratio of **3.9x** is the #1 driver across all segments. The signal is 
 |---|---:|---:|---|
 | 7-Feature Safe Baseline (pre-fix) | 0.650 | 0.535 | Clean |
 | 19-Feature Conservative (pre-fix) | 0.768 | 0.724 | Clean |
-| **Final 40-Feature LightGBM** | **0.819** | **0.740** | **Passed*** |
+| **Final 38-Feature LightGBM** | **0.806** | **0.722** | **Passed*** |
 
-*Passed the 5-test leakage audit. That audit compares training against the 2026 holdout and does not detect a leak confined to the validation fold — a fold-level encoder leak found here was caught by a separate fold-scoping ablation and fixed (see note below). The two baseline rows are pre-fix and were not re-run.*
+*Passed the 5-test leakage audit. That audit compares training against the 2026 holdout and does not detect a leak confined to the validation fold — a fold-level encoder leak found here was caught by a separate fold-scoping ablation and fixed (see note below). Separately, three post-close parts features (`parts_order_to_arrival_days_safe`, its binned twin `parts_delivery_tier`, and `parts_has_arrival_flag`) were removed from the model; doing so moved T=5 holdout AUC from 0.819 to 0.806 (~0.013), confirming the leaked signal was largely redundant with the clean segment median. The two baseline rows are pre-fix and were not re-run.*
 
 **On the leak that was found and fixed** — Training-class aggregates (engineer historical mean, tier/channel/division/month means, city/state target encoding, segment delivery median) were originally fit on the full 2023-2025 cohort and split into train/validation without refitting, letting 2025 reach the validation rows. The fix scopes every aggregate to data available before the rows it serves; the holdout numbers above are leak-free.
 
@@ -201,14 +203,14 @@ The Q4/Q1 ratio of **3.9x** is the #1 driver across all segments. The signal is 
 
 **NPS validation (post-hoc, NPS never used in training; 2025 responders scored out-of-sample by the 2023-24 selection model)**
 
-- **10.4-point gap** in promoter rate between low-risk and high-risk predicted buckets
-- **7.7-point gap** in detractor rate between low-risk and high-risk predicted buckets
+- **11.5-point gap** in promoter rate between low-risk and high-risk predicted buckets
+- **8.3-point gap** in detractor rate between low-risk and high-risk predicted buckets
 
 | Predicted-risk bucket | Promoter rate | Detractor rate |
 |---|---:|---:|
-| Very low (0-20% predicted late) | **69.2%** | 19.6% |
-| Very high (80-100% predicted late) | **58.8%** | **27.3%** |
-| **Gap** | **10.4pp** | **7.7pp** |
+| Very low (0-20% predicted late) | **69.0%** | 19.7% |
+| Very high (80-100% predicted late) | **57.5%** | **28.0%** |
+| **Gap** | **11.5pp** | **8.3pp** |
 
 Predicted lateness tracks customer sentiment in the right direction — promoter rate falls and detractor rate rises from low- to high-risk segments — confirming the prioritization reflects real customer experience and not just a statistical artifact. The signal cannot be tuned from inside the pipeline because NPS is never a feature. Full 5-bucket breakdown: `outputs/prioritization/nps_validation.csv`, 42,451 responders.
 
@@ -260,10 +262,10 @@ Numbers in parentheses are the late rate at T=5 (i.e., share of repairs in that 
 
 | T | Holdout AUC | F1 | On-time rate |
 |---|---:|---:|---:|
-| T=3 | 0.806 | 0.499 | 27.9% |
-| T=5 | 0.819 | 0.740 | 46.8% |
-| T=7 | 0.819 | 0.784 | 62.3% |
-| T=10 | 0.847 | 0.874 | 75.4% |
+| T=3 | 0.798 | 0.506 | 27.9% |
+| T=5 | 0.806 | 0.722 | 46.8% |
+| T=7 | 0.815 | 0.831 | 62.3% |
+| T=10 | 0.841 | 0.900 | 75.4% |
 
 *(The right column is the on-time rate — share completed within T days. The earlier deck labeled this "Late Rate," which was the inverse and incorrect. At T=7/T=10 the target is highly separable, so validation AUC saturates within a couple of boosting iterations and those models train to few trees by design. Per-threshold precision/recall are in `outputs/models/threshold_results.csv`.)*
 
@@ -324,7 +326,7 @@ Numbers in parentheses are the late rate at T=5 (i.e., share of repairs in that 
 
 - Reallocate stronger engineers to high-delay segments
 - Prioritize Urban / Rural Premier Partner and ASD
-- The **biggest reducible lever** — *85K improvable annually under conservative benchmarks across the top 10 segments*
+- The **biggest reducible lever** — *the engineer-deployment segments carry ~71K of the ~100K tier-elevation-improvable cases identified across 2023-2025 (an upper-bound estimate, ~33K/yr, not a forecast)*
 
 **Recommendation 2 — Parts Logistics Second**
 
