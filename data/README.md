@@ -144,7 +144,7 @@ mkdir -p data/raw
 # 2. Run the full pipeline (one stage at a time)
 python ingestion.py             # Steps 1-4: master + parts + reclaim → integrated parquet
 python eda.py                   # Step 5: first-pass EDA, hypothesis list, charts
-python feature_engineering.py   # Step 6: feature build (40 numeric + 1 categorical), leakage review, data dictionary
+python feature_engineering.py   # Step 6: feature build (38 numeric + 1 categorical), leakage review, data dictionary
 python modeling.py              # Step 7: 7 classifiers + 8 regressors, threshold sweep
 python prioritization.py        # Step 8: priority matrix, 4-lever decomposition
 python leakage_audit.py         # Step 9: 5-test feature audit
