@@ -648,7 +648,7 @@ FEATURE_SPEC: dict[str, list[str]] = {
         "is_same_symptom_reclaim",
         "reclaim_period_days",
     ],
-    # --- DMS DEPENDENT (~28% coverage) ---
+    # --- DMS DEPENDENT (~25% coverage) ---
     "dms": [
         "ordered_via_dms",
         "parts_line_count",
@@ -683,13 +683,36 @@ FEATURE_SPEC: dict[str, list[str]] = {
 }
 
 
-def build_model_features_list() -> list[str]:
-    """Assemble MODEL_FEATURES from FEATURE_SPEC, excluding the EDA-only feature.
+# Post-close / arrival-conditional parts features excluded from the model.
+# All three become known only once parts have actually arrived, which for the
+# repair being scored is part of the turnaround we are predicting — they are not
+# available at intake-time scoring. ``seg_delivery_days_hist`` (a training-cohort
+# segment median, TRAINING-class) is the deployment-safe substitute that carries
+# the delivery-speed signal without look-ahead.
+#   - parts_order_to_arrival_days_safe : repair-level actual delivery duration (EDA reference)
+#   - parts_delivery_tier              : the same duration, binned 1-6 (POST_CLOSE)
+#   - parts_has_arrival_flag           : whether a part has *arrived* yet (POST_CLOSE)
+# Retaining the binned tier while excluding the continuous value was a leak:
+# both parts_delivery_tier and parts_has_arrival_flag are POST_CLOSE (they
+# require parts arrival, which is part of the turnaround being predicted). They
+# are kept in FEATURE_SPEC (and the feature parquet) for EDA and audit
+# traceability, but excluded from the trained model here — so they no longer
+# appear in the audited MODEL_FEATURES set.
+_EXCLUDED_FROM_MODEL: frozenset[str] = frozenset({
+    "parts_order_to_arrival_days_safe",
+    "parts_delivery_tier",
+    "parts_has_arrival_flag",
+})
 
-    ``parts_order_to_arrival_days_safe`` is kept in FEATURE_SPEC for
-    documentation but excluded from active model features because it
-    requires post-event arrival data. ``seg_delivery_days_hist`` is its
-    deployment-safe replacement.
+
+def build_model_features_list() -> list[str]:
+    """Assemble MODEL_FEATURES from FEATURE_SPEC, excluding post-close features.
+
+    The features in ``_EXCLUDED_FROM_MODEL`` are kept in FEATURE_SPEC for
+    documentation and audit reference but excluded from active model features
+    because their values require post-event (post-arrival) data and are not
+    available at intake-time scoring. ``seg_delivery_days_hist`` is the
+    deployment-safe replacement that carries the delivery-speed signal.
     """
     feats = (
         FEATURE_SPEC["geography"]
@@ -701,8 +724,8 @@ def build_model_features_list() -> list[str]:
         + FEATURE_SPEC["dms"]
         + FEATURE_SPEC["interactions"]
     )
-    # Exclude the EDA-only conditional feature
-    return [f for f in feats if f != "parts_order_to_arrival_days_safe"]
+    # Exclude the EDA-only / post-close conditional features
+    return [f for f in feats if f not in _EXCLUDED_FROM_MODEL]
 
 
 MODEL_FEATURES: list[str] = build_model_features_list()
@@ -771,6 +794,16 @@ LEAKAGE_REVIEW_ROWS: list[dict] = [
                "have occurred — not available at real-time scoring. Retained in "
                "dataset for EDA and audit documentation only. Replaced by "
                "seg_delivery_days_hist in MODEL_FEATURES."},
+    {"feature": "parts_delivery_tier", "risk": "CONDITIONAL — EXCLUDED FROM MODEL",
+     "reason": "Binned twin (1-6) of parts_order_to_arrival_days_safe. Inherits the "
+               "same POST_CLOSE timing — requires parts arrival to have occurred, so "
+               "not available at intake scoring. Retaining the binned tier while "
+               "excluding the continuous value was the leak found in audit; now "
+               "excluded from MODEL_FEATURES. seg_delivery_days_hist is the substitute."},
+    {"feature": "parts_has_arrival_flag", "risk": "POST_CLOSE — EXCLUDED FROM MODEL",
+     "reason": "Flags whether a part has arrived. Arrival for the repair being scored "
+               "is part of the turnaround being predicted — POST_CLOSE, not known at "
+               "intake. Excluded from MODEL_FEATURES."},
     {"feature": "has_parts_reclaim", "risk": "LOW",
      "reason": "Parts presence recorded at intake. Known before repair completes."},
     {"feature": "is_ter_repair", "risk": "MEDIUM",
@@ -924,8 +957,10 @@ DATA_DICTIONARY_ROWS: list[dict] = [
      "model_use": "feature", "deployment_safe": "YES",
      "description": "1 if more than one part line ordered."},
     {"feature": "parts_has_arrival_flag", "source": "DMS", "type": "Int8",
-     "model_use": "feature", "deployment_safe": "YES",
-     "description": "1 if at least one part has recorded arrival."},
+     "model_use": "eda_reference — EXCLUDED FROM MODEL_FEATURES",
+     "deployment_safe": "NO (POST_CLOSE) — excluded from modeling",
+     "description": "1 if at least one part has recorded arrival. POST_CLOSE — "
+                    "arrival is not known at intake; excluded from MODEL_FEATURES."},
     {"feature": "parts_has_shipment_flag", "source": "DMS", "type": "Int8",
      "model_use": "feature", "deployment_safe": "YES",
      "description": "1 if at least one part has recorded shipment."},
@@ -933,9 +968,12 @@ DATA_DICTIONARY_ROWS: list[dict] = [
      "model_use": "feature", "deployment_safe": "YES",
      "description": "Simplified shipping: OVERNIGHT/TWO_DAY/GROUND/PICKUP/OTHER/UNKNOWN."},
     {"feature": "parts_delivery_tier", "source": "DMS", "type": "Int8",
-     "model_use": "feature", "deployment_safe": "CONDITIONAL",
+     "model_use": "eda_reference — EXCLUDED FROM MODEL_FEATURES",
+     "deployment_safe": "CONDITIONAL (POST_CLOSE) — excluded from modeling",
      "description": "Delivery speed tier 1–6 from actual order→arrival days. "
-                    "~15% populated. Timing-conditional — see seg_delivery_days_hist."},
+                    "~15% populated. POST_CLOSE binned twin of "
+                    "parts_order_to_arrival_days_safe; excluded from MODEL_FEATURES. "
+                    "See seg_delivery_days_hist for the deployment-safe replacement."},
     {"feature": "parts_delivery_tier_known", "source": "DMS", "type": "Int8",
      "model_use": "feature", "deployment_safe": "YES",
      "description": "1 if parts_delivery_tier is populated. ~15% positive. "
