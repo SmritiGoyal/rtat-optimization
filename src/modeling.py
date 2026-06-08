@@ -24,10 +24,11 @@ Regression track (target_days):
 
 Model choice: on the final 2026 holdout LightGBM and XGBoost are within
 ~0.01 AUC of each other at every threshold and trade the lead by threshold
-(LightGBM ahead at T=3/T=5: 0.806/0.819 vs 0.804/0.816; XGBoost ahead at
-T=7/T=10). LightGBM is retained as the primary deployable model — it now leads
-at the primary T=5 target and on regression — with XGBoost reported as a
-validated equal-performance reference. Classifier early stopping watches AUC
+(LightGBM ahead at T=3/T=5/T=10: 0.798/0.806/0.841 vs 0.795/0.803/0.832;
+XGBoost edges it at T=7: 0.816 vs 0.815). LightGBM is retained as the primary
+deployable model — it leads at the primary T=5 target and on regression — with
+XGBoost reported as a validated equal-performance reference. Classifier early
+stopping watches AUC
 (first_metric_only on the auc-first metric list), the metric the model is
 selected on; with logloss watched instead it stopped prematurely on the easy
 high-positive thresholds. At the relaxed thresholds T=7/T=10 the target is
@@ -52,7 +53,7 @@ MODEL_FEATURES — the single source of truth — so the trained model matches t
 leakage review exactly):
     CORE (31 features)     — low missingness, safe for linear models after
                              median fill
-    EXTENDED (40 features) — the numeric MODEL_FEATURES (one categorical-string
+    EXTENDED (38 features) — the numeric MODEL_FEATURES (one categorical-string
                              column, parts_shipping_tier, is documented but
                              excluded from the numeric model). Adds DMS-dependent
                              features (~75% missing); boosters handle nulls
@@ -278,7 +279,7 @@ _NON_NUMERIC_MODEL_FEATURES: tuple[str, ...] = ("parts_shipping_tier",)
 EXTENDED_FEATURES: list[str] = [
     f for f in fe.MODEL_FEATURES if f not in _NON_NUMERIC_MODEL_FEATURES
 ]
-"""40 numeric features for LightGBM/XGBoost — the canonical MODEL_FEATURES
+"""38 numeric features for LightGBM/XGBoost — the canonical MODEL_FEATURES
 (leakage-reviewed) minus the one categorical-string column. Includes
 DMS-dependent features (~75% missing); boosters handle the nulls natively."""
 
@@ -1019,10 +1020,10 @@ def run_final_holdout(
 
     For each threshold T: refit LightGBM and XGBoost on ALL of 2023-2025
     at the locked Phase-1 iteration count, then score the 2026 holdout.
-    LightGBM and XGBoost are within ~0.01 AUC on the holdout and trade the
-    lead by threshold (LightGBM ahead at T=3/T=5, XGBoost at T=7/T=10);
-    LightGBM is reported as the primary/deployable model and XGBoost for
-    comparison.
+    LightGBM and XGBoost are within ~0.01 AUC on the holdout (LightGBM ahead
+    at T=3/T=5/T=10: 0.798/0.806/0.841 vs 0.795/0.803/0.832; XGBoost edges it
+    at T=7: 0.816 vs 0.815); LightGBM is reported as the primary/deployable
+    model and XGBoost for comparison.
 
     This touches the 2026 holdout exactly once. Do NOT tune anything after
     reading these numbers — that would void the holdout.
@@ -1032,7 +1033,8 @@ def run_final_holdout(
     X_full = prep_X(train_final, EXTENDED_FEATURES)
     X_ho = prep_X(holdout_final, EXTENDED_FEATURES)
 
-    # Guard: the Phase-1 XGB regression blew up (MAE 18.7) — almost certainly
+    # Guard: the Phase-1 XGB regression blows up on the holdout (large MAE,
+    # negative R² — ~11d / R² -1.7 in the current run) — almost certainly
     # inf/overflow in the holdout matrix. Surface it instead of silently
     # reporting garbage.
     Xho_np = X_ho.to_numpy(dtype="float32")
