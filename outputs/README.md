@@ -86,17 +86,17 @@ Produced by `feature_engineering.py` (Step 6). The model-ready feature matrices 
 | `leakage_review.csv` | Per-feature: risk class (LOW/MEDIUM/HIGH) + rationale |
 | `missingness_summary.csv` | Per-feature: group, pct_missing, dtype, unique count |
 
-`MODEL_FEATURES` contains 41 entries across 8 groups — **40 numeric features** that feed the trained models, plus one categorical column (`parts_shipping_tier`) that is documented and leakage-audited but held out of the numeric model:
+`MODEL_FEATURES` contains 39 entries across 8 groups — **38 numeric features** that feed the trained models, plus one categorical column (`parts_shipping_tier`) that is documented and leakage-audited but held out of the numeric model:
 
 | Group | Count | Group | Count |
 |---|---|---|---|
 | Geography | 5 | Reclaim | 6 |
-| Channel | 3 | Parts logistics | 11 |
+| Channel | 3 | Parts logistics | 9 |
 | Time | 6 | Interactions | 3 |
-| Product | 4 | **Total** | **41** |
-| Engineer | 3 | | (40 numeric + 1 categorical) |
+| Product | 4 | **Total** | **39** |
+| Engineer | 3 | | (38 numeric + 1 categorical) |
 
-(`parts_order_to_arrival_days_safe` is in the feature parquet for EDA/audit reference but excluded from MODEL_FEATURES entirely.)
+(`parts_order_to_arrival_days_safe`, `parts_delivery_tier`, and `parts_has_arrival_flag` are in the feature parquet for EDA/audit reference but excluded from MODEL_FEATURES entirely — all three are POST_CLOSE.)
 
 ---
 
@@ -117,7 +117,7 @@ Produced by `modeling.py` (Step 7) and updated by `leakage_audit.py` (Step 9).
 | `lasso_features.csv` | Lasso coefficients per CORE feature (4 zeroed of 31 at α=0.01) |
 | `segment_performance.csv` | Per Market_Category: AUC of LightGBM and XGBoost |
 | `channel_performance.csv` | Per Channel: AUC of LightGBM and XGBoost |
-| `leakage_audit.csv` | Per-feature verdicts from the 5-test audit (41 audited, 33 CLEAN) |
+| `leakage_audit.csv` | Per-feature verdicts from the 5-test audit (39 audited, 33 CLEAN) |
 
 ### Model artifacts (joblib pickles)
 
@@ -132,6 +132,8 @@ Produced by `modeling.py` (Step 7) and updated by `leakage_audit.py` (Step 9).
 | `xgb_regression.pkl` | XGBoost reference regressor |
 | `xgb_ontime{3,5,7,10}.pkl` | XGBoost per-threshold classifiers (validated equal to LightGBM) |
 | `lgbm_regression_final.pkl` | LightGBM regressor refit on all 2023-2025 (final holdout model) |
+
+Note: the per-threshold `lgbm_ontime{T}.pkl` are the Phase-1 selection models (trained on 2023-2024). The deployable Phase-2 threshold classifiers — refit on 2023-2025, which produce the 0.806 headline AUC at T=5 — are not currently persisted; only their metrics are logged. Persisting them (and writing the Phase-2 holdout metrics to a CSV) is the one step needed to make the headline reproducible from artifacts rather than from a rerun.
 
 ---
 
