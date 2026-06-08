@@ -104,7 +104,7 @@ These two findings are documented in the EDA output (`5h_reclaim_signal.csv`, `5
 
 ### 4.1 The feature set, grouped
 
-The model uses **40 numeric features** (plus one categorical feature documented but held out of the numeric model) organized into eight groups:
+The model uses **38 numeric features** (plus one categorical feature documented but held out of the numeric model) organized into eight groups:
 
 | Group | Features | Count |
 |---|---|---|
@@ -114,16 +114,18 @@ The model uses **40 numeric features** (plus one categorical feature documented 
 | Product | `div_mean_rtat`, `div_late_rate5`, `is_ter_repair`, `is_sealed_repair` | 4 |
 | Engineer | `engineer_hist_mean_rtat`, `engineer_quartile`, `engineer_proxy_missing` | 3 |
 | Reclaim | `has_parts_reclaim`, `parts_count_reclaim`, `parts_complexity_score`, `is_reclaim`, `is_same_symptom_reclaim`, `reclaim_period_days` | 6 |
-| Parts logistics | `ordered_via_dms`, `parts_line_count`, `parts_order_qty_sum`, `parts_multi_line_flag`, `parts_has_arrival_flag`, `parts_has_shipment_flag`, `parts_shipping_tier`, `parts_delivery_tier`, `parts_delivery_tier_known`, `seg_delivery_days_hist`, `parts_truncation_flag` | 11 |
+| Parts logistics | `ordered_via_dms`, `parts_line_count`, `parts_order_qty_sum`, `parts_multi_line_flag`, `parts_has_shipment_flag`, `parts_shipping_tier`, `parts_delivery_tier_known`, `seg_delivery_days_hist`, `parts_truncation_flag` | 9 |
 | Interactions | `geo_channel_risk`, `rural_parts_flag`, `eng_channel_risk` | 3 |
-| **Total** | | **41** |
+| **Total** | | **39** |
+
+Three POST_CLOSE parts features (`parts_order_to_arrival_days_safe`, its binned twin `parts_delivery_tier`, and `parts_has_arrival_flag`) are retained in the feature parquet for EDA/audit reference but excluded from `MODEL_FEATURES`. The total above is the 38 numeric model features plus the one categorical `parts_shipping_tier`.
 
 ### 4.2 Two-track design: CORE vs EXTENDED
 
-The 40 numeric features split into two model-specific subsets:
+The 38 numeric features split into two model-specific subsets:
 
 - **CORE (31 features)**: low missingness across the training cohort. Safe for linear models after median fill. Excludes DMS-dependent features (parts line count, order quantity, multi-line flag, etc.) because they're ~75% null (only ~25% of repairs route parts through DMS), plus the ~44%-null `seg_delivery_days_hist`.
-- **EXTENDED (40 features = the numeric MODEL_FEATURES)**: adds DMS-dependent features. Used by tree models (Random Forest, XGBoost, LightGBM) that handle missing values natively. Uses the deployment-safe `seg_delivery_days_hist` and excludes both `parts_order_to_arrival_days_safe` (EDA reference only) and the one categorical-string column `parts_shipping_tier` (documented but held out of the numeric model).
+- **EXTENDED (38 features = the numeric MODEL_FEATURES)**: adds DMS-dependent features. Used by tree models (Random Forest, XGBoost, LightGBM) that handle missing values natively. Uses the deployment-safe `seg_delivery_days_hist` and excludes the three POST_CLOSE parts features (`parts_order_to_arrival_days_safe`, `parts_delivery_tier`, `parts_has_arrival_flag`) and the one categorical-string column `parts_shipping_tier` (documented but held out of the numeric model).
 
 This isn't a stylistic choice. Linear models on the EXTENDED set produce worse holdout performance because median fill on 75%-null features destroys signal; tree models on the CORE set leave money on the table. The design is informed by validation metrics, not aesthetic preference.
 
@@ -175,7 +177,7 @@ seg_delivery_days_hist = median(parts_order_to_arrival_days_safe)
 
 At intake time, the actual delivery duration for *this* repair is unknown. But the historical segment median (e.g., "Rural × AE typically takes 12 days") is known. This swap keeps the predictive power of the delivery signal without using post-event information.
 
-The original repair-level feature is retained in the feature parquet for EDA reference and audit traceability, but excluded from `MODEL_FEATURES` and audited in Step 9 as `CONDITIONAL — EXCLUDED FROM MODEL`.
+The original repair-level feature is retained in the feature parquet for EDA reference and audit traceability, but excluded from `MODEL_FEATURES` and audited in Step 9 as `CONDITIONAL — EXCLUDED FROM MODEL`. Its binned twin (`parts_delivery_tier`) and the arrival flag (`parts_has_arrival_flag`) are excluded on the same grounds — all three require parts to have arrived and are unavailable at intake scoring.
 
 ### 4.6 Interaction features
 
@@ -200,7 +202,7 @@ The model comparison runs all models in parallel for fair comparison:
 
 **Regression (8 models):** Mean Baseline → Segment Mean (tier × channel) → Ridge → Lasso → Decision Tree → Random Forest → XGBoost → LightGBM
 
-On the final 2026 holdout, LightGBM and XGBoost are within ~0.01 AUC and trade the lead by threshold — LightGBM ahead at T=3/T=5 (0.806/0.819 vs 0.804/0.816), XGBoost ahead at T=7/T=10; on validation regression XGBoost edges LightGBM within noise (4.93 vs 4.97). LightGBM is the primary deployable model because it leads at the primary T=5 target and on regression on the holdout. The remaining factors:
+On the final 2026 holdout, LightGBM and XGBoost are within ~0.01 AUC and trade the lead by threshold — LightGBM ahead at T=3/T=5/T=10 (0.798/0.806/0.841 vs 0.795/0.803/0.832), XGBoost ahead at T=7 (0.816 vs 0.815); on validation regression XGBoost edges LightGBM within noise (5.04 vs 5.07). LightGBM is the primary deployable model because it leads at the primary T=5 target and on regression on the holdout. The remaining factors:
 
 - **Training efficiency** — LightGBM trained ~25% faster on the full feature matrix
 - **Categorical handling** — LightGBM natively handles high-cardinality categoricals without explicit encoding
@@ -232,7 +234,7 @@ The production LightGBM classifier configuration:
 }
 ```
 
-with `lgb.early_stopping(50)` as the training callback. These are *not* heavily tuned. After the fold-scoped encoder fix, classifier early stopping was switched to watch AUC (the selection metric, `first_metric_only=True` on an auc-first metric list) rather than logloss — with logloss watched, training stopped prematurely on the easy high-positive thresholds. With AUC watched, LightGBM trains to a competitive iteration count at T=3/T=5 (best_iter ~94/113). At T=7/T=10 the target is highly separable and validation AUC saturates within a couple of iterations, so those models legitimately train to few trees. A formal Optuna sweep is still on the "what I'd do differently" list. The chosen values reflect:
+with `lgb.early_stopping(50)` as the training callback. These are *not* heavily tuned. After the fold-scoped encoder fix, classifier early stopping was switched to watch AUC (the selection metric, `first_metric_only=True` on an auc-first metric list) rather than logloss — with logloss watched, training stopped prematurely on the easy high-positive thresholds. With AUC watched, LightGBM trains to a competitive iteration count at T=3/T=5 (best_iter ~96/114). At T=7/T=10 the target is highly separable and validation AUC saturates within a couple of iterations, so those models legitimately train to few trees. A formal Optuna sweep is still on the "what I'd do differently" list. The chosen values reflect:
 
 - `learning_rate = 0.05` with `n_estimators = 500` and early stopping at 50 rounds = a stable mid-tier learning rate that converges well below 500 trees (typically 100-150)
 - `num_leaves = 31` is **conservative for a 1M-row dataset**, paired with `max_depth = 6`. The deliberate undersize prevents the model from learning overly specific patterns
@@ -254,7 +256,7 @@ Training four models is computationally cheap (~30 sec per model on the full fea
 The training data spans 2023-2025; the holdout is 2026 (Jan-Feb). Aggregates are fit on the 2023-2024 fold for selection and refit on all 2023-2025 for the final model; the 2026 holdout is scored exactly once. This discipline is what makes the validation and holdout numbers meaningful.
 
 **Validation-to-holdout, honestly.**
-The model is selected on a strict 2023-2024 -> 2025 split (T=5 validation AUC ~0.77), then refit on all 2023-2025 and scored once on the locked 2026 holdout (T=5 AUC 0.819). The holdout sits slightly above the selection-fold validation because the final model trains on an extra year of data. Generalization is evidenced by consistent performance across all four thresholds and by the NPS external validation — not by a single tight gap.
+The model is selected on a strict 2023-2024 -> 2025 split (T=5 validation AUC ~0.76), then refit on all 2023-2025 and scored once on the locked 2026 holdout (T=5 AUC 0.806). The holdout sits slightly above the selection-fold validation because the final model trains on an extra year of data. Generalization is evidenced by consistent performance across all four thresholds and by the NPS external validation — not by a single tight gap.
 
 A time-ordered split is non-negotiable for a deployment scenario. A random split would let the model see July 2025 patterns at training time and predict on June 2025 — production won't have that information. The time-ordered split is what makes the validation and holdout numbers meaningful; see Section 6.3 for why the originally-reported tight validation->holdout gap was an artifact rather than evidence of generalization.
 
@@ -272,9 +274,9 @@ The first time the 2026 holdout was scored was the final evaluation step. There 
 
 The original pipeline reported a 0.011 validation->holdout gap. That number was an artifact: training-class aggregates were fit on the full 2023-2025 cohort and then split into train/validation without refitting, so the 2025 validation metric was inflated and the gap to the (clean) 2026 holdout looked artificially tight.
 
-After the fix, the honest protocol is two phases — select on 2023-2024 -> 2025, then refit on 2023-2025 and score 2026 once. Final holdout AUC is 0.819 at T=5, 0.806 / 0.819 / 0.819 / 0.847 across T=3/5/7/10. The holdout sits at or above the selection-fold validation (~0.77 at T=5) because the final model trains on an extra year; the consistent across-threshold performance and the NPS external check are the real generalization evidence.
+After the fix, the honest protocol is two phases — select on 2023-2024 -> 2025, then refit on 2023-2025 and score 2026 once. Final holdout AUC is 0.806 at T=5, 0.798 / 0.806 / 0.815 / 0.841 across T=3/5/7/10. The holdout sits at or above the selection-fold validation (~0.76 at T=5) because the final model trains on an extra year; the consistent across-threshold performance and the NPS external check are the real generalization evidence.
 
-A second, independent exposure was found in the same audit: a repair-level parts-delivery feature (`parts_order_to_arrival_days_safe`) known only mid-repair had been included in the trained model despite being documented as excluded. It was replaced with the deployment-safe segment-median substitute (`seg_delivery_days_hist`), bringing the model to 40 numeric features that match the leakage review exactly. Removing it (and adding the safe substitute) barely moved the headline (T=5 0.807 → 0.819) — the leaked signal was largely redundant with the clean features — so the model held at full strength through both fixes.
+A second, independent exposure was found in the same audit: post-close parts features known only once parts had arrived had been included in the trained model despite the continuous version being documented as excluded. The repair-level delivery duration (`parts_order_to_arrival_days_safe`), its binned twin (`parts_delivery_tier`), and the arrival flag (`parts_has_arrival_flag`) all require parts to have arrived and are unavailable at intake scoring. Removing all three and relying on the deployment-safe segment-median substitute (`seg_delivery_days_hist`) brings the model to 38 numeric features that match the leakage review exactly. The fix moves T=5 holdout AUC from 0.819 to 0.806 (a ~0.013 cost) — confirming the leaked signal was largely redundant with the clean segment median, so the model held at near-full strength through both fixes.
 
 ## 7. The Leakage Audit
 
@@ -297,20 +299,19 @@ Most ML practitioners think of leakage as "high correlation with target" (test 2
 
 ### 7.3 The validated audit result
 
-Of the 41 audited features (40 numeric model features + the one categorical feature held out of the numeric model), the audit returns:
+Of the 39 audited features (38 numeric model features + the one categorical feature held out of the numeric model), the audit returns:
 
 | Verdict | Count | Examples |
 |---|---|---|
 | ✓ CLEAN | 33 | All TRAINING and INTAKE-class features that pass correlation + stability |
 | ⚠ CONFIRM WITH OPS | 3 | `is_ter_repair`, `is_sealed_repair`, `eng_channel_risk` |
-| ⚠ REVIEW | 2 | `parts_has_arrival_flag`, `parts_delivery_tier` |
-| ⚠ STABILITY FLAG | 3 | `month_of_year`, `quarter`, plus one feature with > 0.30 KS shift |
+| ⚠ STABILITY FLAG | 3 | `month_of_year`, `quarter`, `month_mean_rtat` — > 0.30 KS shift |
 
-These verdicts are unchanged by the encoder fix — see Section 7.5 for why the audit could not have flagged the leak that was present.
+The two POST_CLOSE parts features that earlier reviews flagged (`parts_delivery_tier`, `parts_has_arrival_flag`) are no longer model features — they were removed from `MODEL_FEATURES`, so the `⚠ REVIEW` category that previously held them is gone. These verdicts are otherwise unchanged by the encoder fix — see Section 7.5 for why the audit could not have flagged the validation-fold leak that was present.
 
 Test 5 (engineer proxy stability) returned a 0.46-day train-vs-holdout gap, well within the 1.0-day tolerance. Test 4 (`reclaim_period_days` targeted check) passed both correlation (< 0.15) and importance (< 5%) thresholds.
 
-The 3 STABILITY FLAG features (`month_of_year`, `quarter`) shift because the 2026 holdout is a partial year (Jan-Feb) versus full-year training. This is acceptable temporal drift, not leakage. The 3 CONFIRM WITH OPS features require human verification of intake-time availability before production deployment — they are kept in the model with this caveat documented.
+The 3 STABILITY FLAG features (`month_of_year`, `quarter`, `month_mean_rtat`) shift because the 2026 holdout is a partial year (Jan-Feb) versus full-year training. This is acceptable temporal drift, not leakage. The 3 CONFIRM WITH OPS features require human verification of intake-time availability before production deployment — they are kept in the model with this caveat documented.
 
 ### 7.4 What the audit doesn't catch
 
@@ -390,11 +391,11 @@ The most defensible piece of the prioritization output is the NPS post-hoc check
 
 | Predicted risk bucket | Promoter rate | Detractor rate |
 |---|---|---|
-| Very low (0-20% predicted late) | 69.2% | 19.6% |
-| Very high (80-100% predicted late) | 58.8% | 27.3% |
-| **Gap** | **10.4pp** | **7.7pp** |
+| Very low (0-20% predicted late) | 69.0% | 19.7% |
+| Very high (80-100% predicted late) | 57.5% | 28.0% |
+| **Gap** | **11.5pp** | **8.3pp** |
 
-The 10.4-point promoter gap and 7.7-point detractor gap are computed out-of-sample — 2025 NPS responders scored by the 2023-2024 selection model (which never saw 2025), with NPS never entering the model. The signal cannot be tuned from inside the pipeline (NPS is not a feature).
+The 11.5-point promoter gap and 8.3-point detractor gap are computed out-of-sample — 2025 NPS responders scored by the 2023-2024 selection model (which never saw 2025), with NPS never entering the model. The signal cannot be tuned from inside the pipeline (NPS is not a feature).
 
 ---
 
@@ -402,10 +403,10 @@ The 10.4-point promoter gap and 7.7-point detractor gap are computed out-of-samp
 
 The project's defensible claims, in order of strength:
 
-1. **Honest out-of-time generalization.** Final 2026 holdout AUC 0.819 (T=5) under a select-then-refit protocol, with two separate leakage exposures found and fixed during a self-directed audit — a fold-level encoder leak and a mid-repair feature wrongly included in the model (Section 7.5). Removing both barely moved the headline, so the model held at full strength.
-2. **Leakage-safe by construction.** Five-test audit across all 41 documented features (33 CLEAN); train-only encoder fits documented; engineer-proxy gap of 0.46d well within tolerance.
-3. **32% MAE improvement over baseline** on the locked 2026 holdout (4.62d vs 6.77d).
+1. **Honest out-of-time generalization.** Final 2026 holdout AUC 0.806 (T=5) under a select-then-refit protocol, with two separate leakage exposures found and fixed during a self-directed audit — a fold-level encoder leak and post-close parts features wrongly included in the model (Section 7.5). Removing them cost ~0.013 AUC at T=5, so the model held at near-full strength.
+2. **Leakage-safe by construction.** Five-test audit across all 39 documented features (33 CLEAN); train-only encoder fits documented; engineer-proxy gap of 0.46d well within tolerance.
+3. **30% MAE improvement over baseline** on the locked 2026 holdout (4.74d vs 6.77d).
 4. **Operational translation across 4 levers.** Top recommendation segment plus three additional levers cover the operational decision space; no single lever monopolizes (43/29/18/11 distribution).
-5. **10.4pp promoter gap, 7.7pp detractor gap** between low-risk and high-risk predicted segments, computed out-of-sample (2025 responders scored by the 2023-24 selection model) without NPS in the model.
+5. **11.5pp promoter gap, 8.3pp detractor gap** between low-risk and high-risk predicted segments, computed out-of-sample (2025 responders scored by the 2023-24 selection model) without NPS in the model.
 
 The weakest claims, by contrast, are about specific lever multipliers (1.15×, 1.30×) — those would benefit from formal sensitivity analysis in a v2.
